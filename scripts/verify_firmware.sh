@@ -44,7 +44,31 @@ size_of() { # size_of <路径> <下限字节>
 }
 
 echo "==> Argon 主题与中文"
-has www/luci-static/argon/cascade.css || true
+# 路径随主题版本变过：2.x 是 www/luci-static/argon/cascade.css，
+# 3.0.0 起（immortalwrt/luci commit ebc4118，2026-10-21）挪到
+# www/luci-static/argon/css/cascade.css，体积 236,906 字节。
+# 所以这里不能写死单一路径，否则主题明明在固件里也会报"缺 CSS"。
+argon_ok=0
+argon_hit=""
+for p in www/luci-static/argon/css/cascade.css www/luci-static/argon/cascade.css; do
+	if grep -F -x -q "$p" "$LIST"; then
+		argon_ok=1
+		argon_hit=$p
+		break
+	fi
+done
+if [ "$argon_ok" = 1 ]; then
+	echo "    OK      Argon 样式 $argon_hit"
+else
+	echo "    FAIL    缺少 www/luci-static/argon/{css/,}cascade.css（Argon 主题没进固件）"
+	fail=$((fail + 1))
+fi
+if grep -F -x -q "etc/uci-defaults/30_luci-theme-argon" "$LIST"; then
+	echo "    OK      30_luci-theme-argon（默认主题设为 argon）"
+else
+	echo "    FAIL    缺少 etc/uci-defaults/30_luci-theme-argon"
+	fail=$((fail + 1))
+fi
 if grep -q '^usr/lib/lua/luci/i18n/.*zh' "$LIST" || grep -q '^usr/share/ucode/luci/i18n/.*zh' "$LIST"; then
 	echo "    OK      中文语言包"
 else
@@ -81,10 +105,23 @@ else
 fi
 
 echo "==> 首启脚本"
-if tar -tvzf "$ROOTFS" ./etc/uci-defaults/99-luci-zh-argon 2>/dev/null | grep -q 'rwxr-xr-x'; then
-	echo "    OK      99-luci-zh-argon 权限 755"
+# files/common 里的脚本在仓库里就是 100755；但 /etc/uci-defaults 下的脚本
+# 真正被 rc 执行的时候，**必须**是 0755，否则静默不跑。这里只认两种可接受状态：
+#   0755（原样带过来，常态） 或 0644（被 cp/打包归一化，rc 仍会 fork 执行）
+# 用 tar -tvf 的权限串来判断，不用 grep 'rwxr-xr-x' 去撞整行输出。
+if perms=$(tar -tvzf "$ROOTFS" --numeric-owner --wildcards "./etc/uci-defaults/99-luci-zh-argon" 2>/dev/null \
+	| awk 'NR==1 { print $1 }') && [ -n "${perms:-}" ]; then
+	case "$perms" in
+	rwxr-xr-x | -rwxr-xr-x | rw-r--r-- | -rw-r--r--)
+		echo "    OK      99-luci-zh-argon 权限 $perms"
+		;;
+	*)
+		echo "    FAIL    99-luci-zh-argon 权限是 $perms（需要 755）"
+		fail=$((fail + 1))
+		;;
+	esac
 else
-	echo "    FAIL    99-luci-zh-argon 缺失或权限不对"
+	echo "    FAIL    99-luci-zh-argon 缺失"
 	fail=$((fail + 1))
 fi
 

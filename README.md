@@ -94,6 +94,8 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
     ```
     报错指向性极差 —— 看上去像"下载失败"，其实是**引号没配上导致整段脚本根本没执行**。修法：取数/校验逻辑一律外置成同名 `fetch.sh`（全程双引号、`set -eu`），`Build/Prepare` 只剩一行 `sh ./fetch.sh "<PKG_BUILD_DIR>" ...`。两个本地包 `openclash-core-meta`、`openclash-geo-db` 都已按此改造，且 `fetch.sh` 在本地实跑通过（内核 62,017,662 字节可执行、四库 sha256 全对）。
     > 推论：**凡是会联网/带引号的构建逻辑，都不要写在 Makefile 的 recipe 里**。Makefile 只负责声明，逻辑交给脚本。
+18. **Argon 3.0.0 把 CSS 挪了位置**：2.x 是 `www/luci-static/argon/cascade.css`，3.0.0 起（`immortalwrt/luci` commit `ebc4118`，2026-10-21）改成 `www/luci-static/argon/css/cascade.css`。自检脚本写死旧路径，于是**主题明明编进固件了却报"缺 CSS"**（实测 CI run 40413422355，编译本身 72 分钟全绿，卡在自检）。现改为两个路径任一命中即算通过，并额外断言 `etc/uci-defaults/30_luci-theme-argon` 存在（证明默认主题真的被设成 argon）。
+19. **别用 `grep 'rwxr-xr-x'` 判权限**：`tar -tv` 打出来的是 `-rwxr-xr-x`，**前面带文件类型字符 `-`**，写死 `rwxr-xr-x` 会命中（因为是子串），但只要有人加了 `^` 锚点就全挂；反过来用 `grep -q 'rwxr-xr-x'` 又会被 `-rwxr-xr-x` 和 `drwxr-xr-x` 同时命中。正确做法是取 `awk 'NR==1{print $1}'` 出来做**精确** `case` 匹配，并把「644 也算可接受」写进白名单 —— `/etc/uci-defaults` 下的脚本被归一化成 644 时 rc 照样会 fork 执行，判 755 会误杀。
 
 
 实测数值（2026-10）：内核下载 22MB → 解压 62MB；Country.mmdb 7.6MB、GeoSite.dat 4.3MB、GeoIP.dat 16.5MB、ASN.mmdb 9.0MB。下载走 `github.com` 直连，失败自动切 `gh-proxy.com` 加速再回退直连（三通道重试）。
