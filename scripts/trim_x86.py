@@ -98,8 +98,22 @@ def trim_device_packages(path: Path) -> int:
     return 0
 
 
-def drop_mount_packages(path: Path) -> int:
-    """从 target/linux/x86/Makefile 的 DEFAULT_PACKAGES 里删掉挂载点相关包。"""
+def trim_default_packages(path: Path) -> int:
+    """裁剪 target/linux/x86/Makefile 的 DEFAULT_PACKAGES。
+
+    这里才是 x86 驱动的大头（v25.12.2 实测）：
+        DEFAULT_PACKAGES += fdisk mkf2fs partx-utils kmod-button-hotplug kmod-e1000e \
+                            kmod-i40e kmod-igb kmod-igbvf kmod-igc kmod-ixgbe \
+                            kmod-ixgbevf kmod-pcnet32 kmod-tulip kmod-vmxnet3 \
+                            kmod-r8101 kmod-r8125 kmod-r8126 kmod-r8168 \
+                            kmod-8139cp kmod-8139too kmod-fs-f2fs kmod-usb-hid \
+                            kmod-usb-net kmod-usb-net-asix ... automount autocore
+
+    两件事一起做：
+      1) 把不在 KEEP 里的 kmod-* 全删掉（配置里写 =n 是无效的，见模块文档字符串）；
+      2) 把 automount / block-mount 删掉（移除"挂载点"）。
+    非 kmod 且非挂载点的项（fdisk / mkf2fs / partx-utils / grub2-bios-setup ...）原样保留。
+    """
     if not path.is_file():
         print(f"!! 找不到 {path}，跳过 DEFAULT_PACKAGES 裁剪")
         return 0
@@ -114,15 +128,31 @@ def drop_mount_packages(path: Path) -> int:
         return 0
 
     header, body = m.group(1), m.group(2)
-    # 把续行拼成一行再按空白切（注意实际写法是 "\" + 若干空格 + 换行）
+    # 把续行拼成一行再按空白切（实际写法是 "\" + 若干空格 + 换行）
     flat = re.sub(r"\\[ \t]*\n", " ", body)
     tokens = flat.split()
-    removed = [t for t in tokens if t.lstrip("-") in DROP_DEFAULT]
-    if not removed:
-        print("==> [挂载点] DEFAULT_PACKAGES 里已无 automount / block-mount")
-        return 0
 
-    kept = [t for t in tokens if t.lstrip("-") not in DROP_DEFAULT]
+    removed_kmod, removed_mount, kept = [], [], []
+    for tok in tokens:
+        name = tok.lstrip("-")
+        if name in DROP_DEFAULT:
+            removed_mount.append(name)
+            continue
+        if name.startswith("kmod-"):
+            if name in KEEP:
+                kept.append(tok)
+            else:
+                removed_kmod.append(name)
+            continue
+        kept.append(tok)
+
+    if not removed_kmod and not removed_mount:
+        print("==> [DEFAULT_PACKAGES] 已无需要裁剪的项")
+        return 0
+    if not kept:
+        print("!! DEFAULT_PACKAGES 被清空，可能解析有误")
+        return 1
+
     # 每行 8 个 token，保持可读；首行行尾补 "\"，末行不加
     chunks = [" ".join(kept[i : i + 8]) for i in range(0, len(kept), 8)]
     body_lines = [("\t" + c + " \\") for c in chunks[:-1]] + ["\t" + chunks[-1]]
@@ -130,7 +160,17 @@ def drop_mount_packages(path: Path) -> int:
     text = text[: m.start()] + new_block + text[m.end():]
     path.write_text(text)
 
-    print(f"==> [挂载点] 从 DEFAULT_PACKAGES 移除：{' '.join(removed)}")
+    if removed_kmod:
+        print(f"==> [驱动] 从 DEFAULT_PACKAGES 移除 {len(removed_kmod)} 个：{' '.join(removed_kmod)}")
+    if removed_mount:
+        print(f"==> [挂载点] 从 DEFAULT_PACKAGES 移除：{' '.join(removed_mount)}")
+    print(f"==> [DEFAULT_PACKAGES] 保留：{' '.join(kept)}")
+
+    # 硬性断言：改写后不允许再有被裁掉的 kmod 或挂载点包
+    leftover = [t for t in kept if t.lstrip("-") in DROP_DEFAULT]
+    if leftover:
+        print(f"!! DEFAULT_PACKAGES 里仍残留挂载点包：{' '.join(leftover)}")
+        return 1
     return 0
 
 
@@ -143,7 +183,7 @@ def main() -> int:
     rc = trim_device_packages(dev)
     # 64.mk 在 target/linux/x86/image/ 下，target Makefile 在 target/linux/x86/
     target_mk = dev.parent.parent / "Makefile"
-    rc |= drop_mount_packages(target_mk)
+    rc |= trim_default_packages(target_mk)
     return rc
 
 
