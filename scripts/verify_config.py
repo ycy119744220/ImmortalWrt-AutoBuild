@@ -28,15 +28,22 @@ MUST_Y = [
 
 # 必须关闭
 MUST_N = [
-    # 挂载点（用户明确要求移除）。
-    # block-mount 同时受 CONFIG_PACKAGE_* 和 x86 目标的 DEFAULT_PACKAGES 控制，
-    # 只关 CONFIG_PACKAGE_block-mount 会被 CONFIG_DEFAULT_block-mount 重新拉回来，
-    # 所以两条都要查。automount 显式 DEPENDS:+block-mount，一并关掉。
+    # 挂载点（用户明确要求移除）
+    # 只查 PACKAGE_*：DEFAULT_block-mount 是 target-metadata.pl 生成的纯 bool，
+    # 由 TARGET_DEVICE_* 用 select 强制打开，.config 里关不掉，
+    # 只能靠 trim_x86.py 改 target Makefile 的 DEFAULT_PACKAGES。
+    # 所以 DEFAULT_* 不放进硬性检查（否则永远是假失败），
+    # 单独在下面的 REPORT_ONLY 里提示。
     ("挂载点（Mount Points）",
-     ["PACKAGE_luci-app-fstab", "PACKAGE_block-mount", "PACKAGE_automount",
-      "DEFAULT_block-mount", "DEFAULT_automount"]),
+     ["PACKAGE_luci-app-fstab", "PACKAGE_block-mount", "PACKAGE_automount"]),
     ("性能开关", ["RUBY_ENABLE_YJIT"]),
     ("产物类型", ["TARGET_ROOTFS_SQUASHFS", "GRUB_IMAGES"]),
+]
+
+# 仅提示、不判定失败：这些符号由 select 强制设定，.config 写什么都没用
+REPORT_ONLY = [
+    ("挂载点·DEFAULT 标记（须由 trim_x86.py 处理）",
+     ["DEFAULT_block-mount", "DEFAULT_automount"]),
 ]
 
 
@@ -96,15 +103,28 @@ def main():
             else:
                 print(f"    OK      {s} 未启用（{v}）")
 
+    for title, syms in REPORT_ONLY:
+        print(f"==> {title}")
+        for s in syms:
+            v = values.get(s)
+            if v in ("y", "m"):
+                print(f"    NOTE    {s}={v}（由 select 强制，仅提示，不计失败）")
+            else:
+                print(f"    OK      {s} 未启用（{v}）")
+
     total = sum(1 for k in values if values[k] is not None)
     print()
     print(f"==> 统计：FAIL={fail} WARN={warn}，配置项 {total} 个")
     if fail:
         print(f"!! 配置校验失败（{fail} 项）")
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            for i, line in enumerate(fh, 1):
-                if any(t in line for t in ("RUBY", "YJIT", "openclash", "argon", "igc", "dnsmasq")):
-                    print(f"  {i}: {line.rstrip()}")
+        for path in paths:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                for i, line in enumerate(fh, 1):
+                    if any(
+                        t in line
+                        for t in ("RUBY", "YJIT", "openclash", "argon", "igc", "dnsmasq", "block-mount", "automount")
+                    ):
+                        print(f"  {path}:{i}: {line.rstrip()}")
         return 1
 
     print("==> 配置校验通过")

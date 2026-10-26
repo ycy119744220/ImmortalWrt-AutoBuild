@@ -47,6 +47,13 @@ jobs:
       - name: 删除官方 OpenClash 桩数据文件
         run: ./scripts/strip_oc_assets.sh openwrt
 
+      - name: 精简 x86 网卡/显卡驱动 + 移除挂载点
+        run: |
+          set -euo pipefail
+          # 必须和 build.yml 保持一致：preflight 不跑这一步的话，
+          # block-mount / automount 会因为 DEFAULT_PACKAGES 被拉回来而假失败。
+          python3 scripts/trim_x86.py openwrt/target/linux/x86/image/64.mk
+
       - name: 生成并校验 .config
         run: |
           set -euo pipefail
