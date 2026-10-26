@@ -82,6 +82,8 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
 10. **`python3-distutils` 在 Ubuntu 24.04 已被移除**（Python 3.12 删掉 distutils）。混在 `apt-get install` 主列表里会让整步以 `exit 100` 失败，需单独 `|| true` 容错安装。
 11. **`actions/checkout@v4`、`upload-artifact@v4` 跑在 Node 20 上**，GitHub 会报 Node.js 20 deprecated 警告。已全部升到 v7（`using: node24`）。
 12. **匿名调用 GitHub API 会撞 403**：解析上游 tag 时原本是裸 `curl`，共享 runner IP 只有 60 次/小时匿名额度，一撞上就 `curl: (22) ... error: 403`，整条流水线直接红。现统一走 `scripts/resolve_tag.sh`：带 `GITHUB_TOKEN` 认证（5000 次/小时），失败自动退回 `git ls-remote --tags`（完全不受 API 限流影响），两条都挂才报错。
+13. **`CONFIG_DEFAULT_*` 在 `.config` 里关不掉**：`target-metadata.pl` 生成的是**没有 default 的纯 bool**，由 `TARGET_DEVICE_*` 通过 `select DEFAULT_block-mount` 强制打开。写 `# CONFIG_DEFAULT_block-mount is not set` 会被 `select` 立刻覆盖回来（实测两轮 CI 均 FAIL）。唯一可靠做法是改 `target/linux/x86/Makefile` 的 `DEFAULT_PACKAGES` —— 已由 `trim_x86.py` 的 `drop_mount_packages()` 处理。校验器里 `DEFAULT_*` 只作 NOTE，不做失败判定。
+14. **单编包前必须先 `make tools/install`**：直接 `make package/xxx/compile` 会跳过 `tools/` 构建，解压源码时找不到 `staging_dir/host/bin/libdeflate-gzip`，报 `libdeflate-gzip: No such file or directory` + `This does not look like a tar archive`，看着像网络下载失败，其实是 host 工具链没建。只有 preflight 这种"只编单个包"的场景会踩到，真实构建走完整流程不受影响。
 
 实测数值（2026-10）：内核下载 22MB → 解压 62MB；Country.mmdb 7.6MB、GeoSite.dat 4.3MB、GeoIP.dat 16.5MB、ASN.mmdb 9.0MB。下载走 `github.com` 直连，失败自动切 `gh-proxy.com` 加速再回退直连（三通道重试）。
 
