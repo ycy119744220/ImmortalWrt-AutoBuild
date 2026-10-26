@@ -31,26 +31,22 @@ jobs:
       should_build: ${{ steps.pick.outputs.should_build }}
       tag: ${{ steps.pick.outputs.tag }}
     steps:
+      - uses: actions/checkout@v7
+
       - name: 取上游最新正式 tag
         id: pick
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          echo "==> 列出 immortalwrt/immortalwrt 的 tag"
-          curl -fsSL -H 'Accept: application/vnd.github+json' \
-            "https://api.github.com/repos/immortalwrt/immortalwrt/tags?per_page=100" \
-            | grep -o '"name": *"[^"]*"' | sed 's/.*: *"//; s/"$//' > /tmp/tags.txt
-          echo "--- 上游 tag（前 30 个）---"
-          head -30 /tmp/tags.txt
-
-          # 正式版形如 v25.12.2 / v24.10.5；排除任何带 rc/beta/alpha/snapshot 的候选版本
-          TAG=$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' /tmp/tags.txt \
-                | grep -viE 'rc|beta|alpha|snapshot' \
-                | sort -V | tail -1 || true)
+          echo "==> 解析 immortalwrt/immortalwrt 最新正式版 tag"
+          # 统一走 resolve_tag.sh：带 token 认证，API 限流时自动退回 git ls-remote
+          chmod +x scripts/resolve_tag.sh
+          TAG=$(./scripts/resolve_tag.sh --check || true)
 
           if [ -z "${TAG:-}" ]; then
-            echo "!! 没有匹配到任何正式版 tag"
+            echo "!! 没有匹配到任何正式版 tag（或上游不可达）"
             echo "should_build=false" >> "$GITHUB_OUTPUT"
             echo "tag=" >> "$GITHUB_OUTPUT"
             exit 0

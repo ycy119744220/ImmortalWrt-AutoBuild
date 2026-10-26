@@ -2,7 +2,7 @@
 
 自动跟踪 [immortalwrt/immortalwrt](https://github.com/immortalwrt/immortalwrt) 的最新**正式版** tag，编译 x86_64 固件，并发布到本仓库 Releases。
 
-默认**简体中文** + **Argon 主题**，内置 **UPnP**、**OpenClash（含 Mihomo 内核与四个数据库）**，已移除**挂载点**菜单。
+默认**简体中文** + **Argon 主题（含 `luci-app-argon-config` 设置面板）**，内置 **UPnP**、**OpenClash（含 Mihomo 内核与四个数据库）**，已移除**挂载点**功能（`block-mount` / `automount`）。
 
 ## 发布产物
 
@@ -77,6 +77,10 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
 5. **内核 404**：曾写死下载地址。现在动态解析 `releases/latest`，并按 `-v1.x.y` 格式拼装（tag 自带 `v`），跳过 `-compatible` 变体；解压后体积 >20MB 且 `clash_meta -v` 能跑才算通过。
 6. **Ruby YJIT 拖慢 2 小时**：x86_64 上 `RUBY_ENABLE_YJIT` 默认 `=y`，会先编 `rust/host`，rustc 再编一遍 LLVM。`config/ci-extra.config` 已关闭。
 7. **配置校验脚本曾长期"假通过"**：`verify_config.py` 的前几版用 awk/grep 实现，连环踩了四个隐式行为坑 —— `index()` 前缀误判、mawk 把 `luci-theme-argon` 当算术表达式、`key` 是 mawk 内置函数名、`CONFIG` 是 bash 保留变量会被读成空。表现为**所有检查一律 WARN 放行**，看着"通过"其实什么都没验。现改为 Python 逐行字符串比较，并用「正例全绿 + 反例必须报 FAIL」双向验证过。
+8. **`feeds list -r` 的 `-r` 不是包名**：它是「限定 feed 名」（`luci`/`packages`/…）。传包名进去搜索范围为 0，永远返回空，会误报「官方 feed 里没有 luci-theme-argon」。另外 `feeds list` 的输出格式是 `printf "%-32s\t%s\n"`，**包名被补齐到 32 字符后才跟 TAB**，按 `$1==包名` 精确比较会因尾部空格失败 —— 必须先 `gsub` 掉尾部空白。两个坑叠在一起，排查花了三轮 CI。
+9. **`block-mount` 压不住**：x86 目标的 `DEFAULT_PACKAGES` 自带 `block-mount`，会在 `defconfig` 时无条件拉回，只写 `CONFIG_PACKAGE_block-mount=n` 是**无效**的（实测 FAIL）。必须同时写 `# CONFIG_DEFAULT_block-mount is not set`。`automount` 显式 `DEPENDS:+block-mount`，也要一起关。
+10. **`python3-distutils` 在 Ubuntu 24.04 已被移除**（Python 3.12 删掉 distutils）。混在 `apt-get install` 主列表里会让整步以 `exit 100` 失败，需单独 `|| true` 容错安装。
+11. **`actions/checkout@v4`、`upload-artifact@v4` 跑在 Node 20 上**，GitHub 会报 Node.js 20 deprecated 警告。已全部升到 v7（`using: node24`）。
 
 实测数值（2026-10）：内核下载 22MB → 解压 62MB；Country.mmdb 7.6MB、GeoSite.dat 4.3MB、GeoIP.dat 16.5MB、ASN.mmdb 9.0MB。下载走 `github.com` 直连，失败自动切 `gh-proxy.com` 加速再回退直连（三通道重试）。
 
@@ -84,7 +88,7 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
 
 任一失败都会让 job 变红、不发 Release：
 
-1. `verify_config.py`：Argon / 中文 / UPnP / OpenClash 三件套 / 依赖必须 `=y`；`luci-app-fstab`、`block-mount`、`RUBY_ENABLE_YJIT` 必须关闭。**符号不存在只告警不失败**（kconfig 对未被引用的符号不写任何行）。
+1. `verify_config.py`：Argon 主题 + 设置工具 / 中文 / UPnP / OpenClash 三件套 / 依赖必须 `=y`；`luci-app-fstab`、`block-mount`、`automount`、`DEFAULT_block-mount`、`DEFAULT_automount`、`RUBY_ENABLE_YJIT` 必须关闭。**符号不存在只告警不失败**（kconfig 对未被引用的符号不写任何行）。
 2. `verify_firmware.sh`：rootfs 里必须真有 Argon 资源、中文语言包、`clash_meta`（>20MB）、四个库（体积下限）、首启脚本 755；普通版不得含预配置脚本。
 3. `make_preconfigured.sh`：注入后必须能在镜像里定位 rootfs 分区（靠 `/etc/openwrt_release` 而非 `/dev/ 第一个 ext4`）、`90-preconfigured` 权限 755，gzip 完整性通过。
 4. `make` 全程 `set -o pipefail`，失败即红并上传 `build.log`。

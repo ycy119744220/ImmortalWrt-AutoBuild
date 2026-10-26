@@ -41,16 +41,15 @@ jobs:
 
       - name: 解析上游 tag
         id: ver
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           TAG="${{ inputs.tag }}"
           if [ -z "$TAG" ]; then
-            curl -fsSL -H 'Accept: application/vnd.github+json' \
-              "https://api.github.com/repos/immortalwrt/immortalwrt/tags?per_page=100" \
-              | grep -o '"name": *"[^"]*"' | sed 's/.*: *"//; s/"$//' \
-              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -viE 'rc|beta|alpha|snapshot' \
-              | sort -V | tail -1 > /tmp/tag
-            TAG=$(cat /tmp/tag)
+            # 统一走 resolve_tag.sh：带 token 认证，API 限流时自动退回 git ls-remote
+            chmod +x scripts/resolve_tag.sh
+            TAG=$(./scripts/resolve_tag.sh)
           fi
           [ -n "$TAG" ] || { echo "!! 解析 tag 失败"; exit 1; }
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
