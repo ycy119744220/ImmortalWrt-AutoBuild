@@ -1,0 +1,72 @@
+#!/bin/sh
+# 仅 preconfigured 镜像包含：初始网络 / 静态租约 / 端口转发 / UPnP / 时区
+#
+# 沿用 OpenWrt-AutoBuild 的预配置内容，仅把 hostname 换成 ImmortalWrt。
+# 注意：静态租约与端口转发写的是 192.168.88.x（你的内网网段），
+#       LAN 是 192.168.1.1/24 时这两组会被 dnsmasq/firewall 忽略（不报错、不生效）。
+#       需要生效时把 LAN 改成 192.168.88.1/24 即可。
+
+uci set network.lan.ipaddr='192.168.1.1'
+uci set network.lan.netmask='255.255.255.0'
+
+uci set network.wan.proto='pppoe'
+uci set network.wan.username=''
+uci set network.wan.password=''
+
+uci set dhcp.lan.start='100'
+uci set dhcp.lan.limit='100'
+uci set dhcp.lan.leasetime='12h'
+
+add_host() {
+	uci -q delete "dhcp.$1"
+	uci set "dhcp.$1=host"
+	uci set "dhcp.$1.name=$2"
+	uci set "dhcp.$1.mac=$3"
+	uci set "dhcp.$1.ip=$4"
+	uci set "dhcp.$1.dns=1"
+}
+add_host 'Yang_PC'  'Yang-PC'  '10:FF:E0:85:E4:BE' '192.168.88.88'
+add_host 'IQOO_12'  'IQOO-12'  '1C:7A:43:75:39:69' '192.168.88.89'
+add_host 'AX6000'   'AX6000'   '3C:CD:57:F2:B0:14' '192.168.88.2'
+add_host 'AX6000_2' 'AX6000-2' '3C:CD:57:F3:87:0C' '192.168.88.3'
+
+add_redirect() {
+	uci -q delete "firewall.$1"
+	uci set "firewall.$1=redirect"
+	uci set "firewall.$1.name=$1"
+	uci set "firewall.$1.target=DNAT"
+	uci set "firewall.$1.src=wan"
+	uci set "firewall.$1.dest=lan"
+	uci set "firewall.$1.proto=tcp"
+	uci set "firewall.$1.src_dport=$2"
+	uci set "firewall.$1.dest_ip=$3"
+	uci set "firewall.$1.dest_port=$2"
+	uci set "firewall.$1.family=ipv4"
+}
+add_redirect 'Docker_Bitwarden' '8890' '192.168.88.254'
+add_redirect 'Synology_Portal'  '8888' '192.168.88.254'
+add_redirect 'Synology_Drive'   '6690' '192.168.88.254'
+add_redirect 'Synology_Photo'   '443'  '192.168.88.254'
+add_redirect 'Synology_VPN'     '9999' '192.168.88.254'
+
+uci set upnpd.config.enabled='1'
+uci set upnpd.config.enable_upnp='1'
+uci set upnpd.config.enable_natpmp='1'
+uci set upnpd.config.enable_pcp='1'
+uci set upnpd.config.igdv1='1'
+uci set upnpd.config.downlink='1024'
+uci set upnpd.config.uplink='512'
+
+uci set system.@system[0].hostname='ImmortalWrt'
+uci set system.@system[0].timezone='CST-8'
+uci set system.@system[0].zonename='Asia/Shanghai'
+uci -q delete system.ntp.server
+uci add_list system.ntp.server='ntp.aliyun.com'
+uci add_list system.ntp.server='cn.pool.ntp.org'
+
+uci commit network
+uci commit dhcp
+uci commit firewall
+uci commit upnpd
+uci commit system
+exit 0
