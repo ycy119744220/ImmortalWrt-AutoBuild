@@ -1,0 +1,13 @@
+# 生成物
+release-out/
+build.log
+*.img
+*.img.gz
+
+# 本地编译产物
+openwrt/
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
