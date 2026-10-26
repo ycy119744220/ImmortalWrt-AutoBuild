@@ -53,12 +53,15 @@ def load(path):
 
 
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else "openwrt/.config"
-    if not os.path.isfile(path):
-        print(f"!! 找不到配置文件: {path}")
-        return 1
-
-    values = load(path)
+    paths = sys.argv[1:] or ["openwrt/.config"]
+    values = {}
+    for path in paths:
+        if not os.path.isfile(path):
+            print(f"!! 找不到配置文件: {path}")
+            return 1
+        # 多个配置文件按顺序覆盖，语义与 prepare_config.sh 的合并一致
+        values.update(load(path))
+    print("==> 已合并配置文件: " + ", ".join(paths))
     fail = warn = 0
 
     for title, syms in MUST_Y:
