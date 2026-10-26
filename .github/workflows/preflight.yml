@@ -84,30 +84,36 @@ jobs:
           done
 
           echo "==> 两个本地包的 Makefile 能被 OpenWrt 正确解析"
-          # 正确姿势是 `make -C package/<pkg> DUMP=1` —— 见 include/package.mk 第 7 行：
-          #   all: $(if $(DUMP),dumpinfo,$(if $(CHECK),check,compile))
-          # 只做元数据导出，不下载、不编译，秒级完成。
+          # 两个坑都踩过，写清楚免得后人再踩：
+          #   1) `make package/<pkg>/dump` —— package/Makefile 根本没这个目标，
+          #      会落到 toplevel.mk 的兜底规则 `%::`，报一句毫无信息量的
+          #      "make -r package/xxx/dump: build failed. Please re-run make with -j1 V=s"。
+          #   2) `make -C package/<pkg> DUMP=1` —— TOPDIR 不会被导出，
+          #      于是 include 变成 "/package.mk: No such file or directory"。
           #
-          # 不要写 `make package/<pkg>/dump`：那个目标 package/Makefile 根本不提供，
-          # 会落到 toplevel.mk 的兜底规则 `%::` 里，先跑 prereq 再 SUBMAKE -r，
-          # 最后报一句毫无信息量的
-          #   make -r package/xxx/dump: build failed. Please re-run make with -j1 V=s
-          # （实测就是这么红了一次）。
-          for pkg in openclash-core-meta openclash-geo-db; do
-            # 必须在 openwrt/ 根目录下调用：package.mk 里的 TOPDIR 依赖当前目录，
-            # 换成 `make -C openwrt/package/xxx` 会因为找不到 rules.mk 而失败。
-            out=$(cd openwrt && make -C "package/$pkg" DUMP=1 2>&1) || {
-              echo "!! $pkg 解析失败："; echo "$out" | tail -40; exit 1
+          # 正确姿势：在 openwrt/ 根目录执行 `make package/<目录名>/compile DUMP=1`。
+          #   - TOPDIR 由顶层 Makefile 第 5 行 `TOPDIR:=${CURDIR}` 定义并 export，
+          #     只有走顶层才会被导出；直接 `make -C package/xxx` 会让 TOPDIR 为空，
+          #     include 变成 "/package.mk: No such file or directory"（实测踩过）。
+          #   - DUMP=1 时 include/package.mk 的 `all` 目标变成 dumpinfo，
+          #     只导出元数据，不下载、不编译。
+          #   - 目标是目录名（openclash-core-meta），不是 Package 名，二者这里恰好相同。
+          for dir in openclash-core-meta openclash-geo-db; do
+            out=$(cd openwrt && make "package/$dir/compile" DUMP=1 2>&1) || {
+              echo "!! $dir 解析失败："; echo "$out" | tail -40; exit 1
             }
-            printf '%s\n' "$out" | grep -qx "Package: $pkg" || {
-              echo "!! $pkg 没有被解析成包，实际输出："; echo "$out" | tail -40; exit 1
+            # dumpinfo 输出的第一段就是主包，形如：
+            #   Package: openclash-core-meta
+            #   Version: 1.0-1
+            #   Depends: +luci-app-openclash
+            pkg=$(printf '%s\n' "$out" | sed -n 's/^Package: //p' | head -1)
+            [ -n "$pkg" ] || {
+              echo "!! $dir 没有导出任何 Package 字段，实际输出："
+              echo "$out" | tail -40; exit 1
             }
-            # 依赖关系也一并打印出来，便于在日志里核对（DEPENDS 写错是最常见的坑）
-            deps=$(printf '%s\n' "$out" | sed -n 's/^Depends: //p')
-            title=$(printf '%s\n' "$out" | sed -n 's/^Description: //p' | head -1)
-            echo "    OK  $pkg"
+            deps=$(printf '%s\n' "$out" | sed -n 's/^Depends: //p' | head -1)
+            echo "    OK  $dir -> Package: $pkg"
             echo "        depends: ${deps:-（无）}"
-            echo "        desc   : ${title:0:80}"
           done
 
       - name: 下载并校验内核 + 四个数据库（与包 Makefile 同一套规则）
