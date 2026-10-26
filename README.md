@@ -86,6 +86,15 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
 14. **单编包前必须先 `make tools/install`**：直接 `make package/xxx/compile` 会跳过 `tools/` 构建，解压源码时找不到 `staging_dir/host/bin/libdeflate-gzip`，报 `libdeflate-gzip: No such file or directory` + `This does not look like a tar archive`，看着像网络下载失败，其实是 host 工具链没建。同理 `toolchain/install` 也不能省，否则 `package/libs/toolchain` 找不到 `libgcc_s.so.*` 而失败。只有 preflight 这种"只编单个包"的场景会踩到，真实构建走完整流程不受影响。
 15. **`make ... V=s 2>&1 | tee log` 会把步骤拖死**：`tools/install` + `toolchain/install` 在 `V=s` 下能刷出上 GB 日志，`tee` 让每行同时"写文件 + 写 stdout"，Actions 端还要再落一次盘，IO 打满后整步能从 20 分钟拖到 60 分钟以上不结束（实测卡死过一次，只能取消）。现在统一改为**日志落文件、成功不打印、失败只回放尾部 N 行**，整机编译那步同样处理。
 16. **`tar -tvzf` 的 `$3` 不一定是体积**：属主名超过 8 字符时 tar 会改印 `uid/gid`，字段整体右移一位，`awk '{print $3}'` 就拿不到体积 —— 表现为"文件明明 16MB 却报 0 字节"。`verify_firmware.sh` 已加 `--numeric-owner` 固定格式。
+17. **`Build/Prepare` 里不能写 shell 函数和嵌套引号**（本轮最贵的一课：整机编译跑到 **76 分钟**才红）。`package.mk` 对**带 `@` 前缀**的 recipe 行会把整段压成一行交给 `bash -c`，此时 `$(DIRECT)` 在定义那一刻就展开成空串，接着 `fetch xxx` 里的 `$1`/`$2` 全空，于是：
+    ```
+    bash: -c: line 1: unexpected EOF while looking for matching `''
+    ==> 下载   <-  
+    curl: option -o: is badly used here
+    ```
+    报错指向性极差 —— 看上去像"下载失败"，其实是**引号没配上导致整段脚本根本没执行**。修法：取数/校验逻辑一律外置成同名 `fetch.sh`（全程双引号、`set -eu`），`Build/Prepare` 只剩一行 `sh ./fetch.sh "<PKG_BUILD_DIR>" ...`。两个本地包 `openclash-core-meta`、`openclash-geo-db` 都已按此改造，且 `fetch.sh` 在本地实跑通过（内核 62,017,662 字节可执行、四库 sha256 全对）。
+    > 推论：**凡是会联网/带引号的构建逻辑，都不要写在 Makefile 的 recipe 里**。Makefile 只负责声明，逻辑交给脚本。
+
 
 实测数值（2026-10）：内核下载 22MB → 解压 62MB；Country.mmdb 7.6MB、GeoSite.dat 4.3MB、GeoIP.dat 16.5MB、ASN.mmdb 9.0MB。下载走 `github.com` 直连，失败自动切 `gh-proxy.com` 加速再回退直连（三通道重试）。
 
