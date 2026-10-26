@@ -1,0 +1,38 @@
+name: fetch-check
+
+# 最快的验证：只跑「内核 + 4 个数据库」的下载与校验，1-3 分钟。
+# 对应 scripts/fetch-check.sh，规则与 package/*/Makefile 完全一致。
+# 上游改了资产名 / meta.zip 消失 / 代理挂掉，这里立刻红，不用等编译。
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'package/**'
+      - 'scripts/fetch-check.sh'
+      - '.github/workflows/fetch-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  fetch-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载并校验内核与四个数据库
+        run: |
+          chmod +x scripts/fetch-check.sh
+          ./scripts/fetch-check.sh "$RUNNER_TEMP/oc-assets" 2>&1 | tee /tmp/fetch.log
+
+      - name: 打印结果
+        if: always()
+        run: |
+          {
+            echo "### fetch-check"
+            echo '```'
+            grep -E '^(OK|FAIL)|^tag =|解压后' /tmp/fetch.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

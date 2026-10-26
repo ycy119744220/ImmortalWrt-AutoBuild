@@ -1,0 +1,239 @@
+name: build
+
+# 编译 ImmortalWrt x86_64，产出「普通版」与「preconfigured 预配置版」并发布到本仓库 Releases
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'ImmortalWrt 上游 tag（留空=自动取最新正式版）'
+        required: false
+        default: ''
+      skip_publish:
+        description: '只编译不发布（调试用）'
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ inputs.tag || 'latest' }}
+  cancel-in-progress: false
+
+env:
+  # 关掉遥测/交互式提示，保证 make 全自动
+  DEBIAN_FRONTEND: noninteractive
+  FORCE_UNSAFE_CONFIGURE: '1'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 解析上游 tag
+        id: ver
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            curl -fsSL -H 'Accept: application/vnd.github+json' \
+              "https://api.github.com/repos/immortalwrt/immortalwrt/tags?per_page=100" \
+              | grep -o '"name": *"[^"]*"' | sed 's/.*: *"//; s/"$//' \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -viE 'rc|beta|alpha|snapshot' \
+              | sort -V | tail -1 > /tmp/tag
+            TAG=$(cat /tmp/tag)
+          fi
+          [ -n "$TAG" ] || { echo "!! 解析 tag 失败"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "==> 目标版本: $TAG"
+
+      - name: 安装编译依赖
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get -y install \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses-dev libssl-dev python3-distutils rsync unzip \
+            zlib1g-dev file wget curl pigz subversion device-tree-compiler \
+            python3-setuptools libelf-dev
+
+      - name: 拉源码与官方 feeds
+        run: |
+          set -euo pipefail
+          chmod +x scripts/*.sh scripts/*.py
+          ./scripts/feeds.sh "${{ steps.ver.outputs.tag }}"
+
+      - name: 删除官方 OpenClash 自带桩数据文件（避免 apk 覆盖冲突）
+        run: ./scripts/strip_oc_assets.sh openwrt
+
+      - name: 生成 .config
+        run: |
+          set -euo pipefail
+          ./scripts/prepare_config.sh config/x86_64.config config/ci-extra.config /tmp/base.config
+          cp /tmp/base.config openwrt/.config
+          cd openwrt
+          # 注入两个镜像共用的首启脚本（Argon + 中文）
+          mkdir -p files
+          cp -a ../files/common/. files/
+          make defconfig
+
+      - name: 精简 x86 网卡/显卡驱动
+        run: |
+          set -euo pipefail
+          python3 scripts/trim_x86.py openwrt/target/linux/x86/image/64.mk
+
+      - name: 二次 defconfig + 校验
+        run: |
+          set -euo pipefail
+          cd openwrt
+          make defconfig
+          cd ..
+          python3 scripts/verify_config.py openwrt/.config
+
+      - name: 下载依赖包（失败重试三次）
+        run: |
+          set -euo pipefail
+          cd openwrt
+          for i in 1 2 3; do
+            echo "==> make download 第 $i 次"
+            if make -j"$(nproc)" download; then
+              echo "==> download 成功"
+              exit 0
+            fi
+            echo "!! download 有失败项，重试"
+            sleep 10
+          done
+          echo "!! download 连续三次失败"
+          exit 1
+
+      - name: 编译
+        run: |
+          set -euo pipefail
+          cd openwrt
+          # pipefail 必须开：否则 make 的失败会被 tee 的退出码吞掉，
+          # 步骤显示 success，直到下一步 Collect 才报错，日志里看不到真正原因
+          set -o pipefail
+          make -j"$(nproc)" V=s 2>&1 | tee ../build.log
+
+      - name: 上传编译日志（仅失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ steps.ver.outputs.tag }}
+          path: build.log
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: 固件自检
+        run: ./scripts/verify_firmware.sh
+
+      - name: 生成预配置版镜像
+        run: |
+          set -euo pipefail
+          ./scripts/make_preconfigured.sh "${{ steps.ver.outputs.tag }}" \
+            files/preconfigured release-out
+
+      - name: 收集产物
+        run: ./scripts/collect.sh "${{ steps.ver.outputs.tag }}" release-out
+
+      - name: 保存 .config 作为 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-${{ steps.ver.outputs.tag }}
+          path: openwrt/.config
+          retention-days: 30
+          include-hidden-files: true
+
+      - name: Checksums（只打印进日志）
+        run: |
+          set -euo pipefail
+          cd release-out
+          echo "==> SHA256"
+          sha256sum *.img.gz | tee /tmp/sha256.txt
+          {
+            echo "SHA256:"
+            echo '```'
+            cat /tmp/sha256.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 删除同 tag 的旧 Release（重跑时避免附件残留）
+        if: ${{ !inputs.skip_publish }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.ver.outputs.tag }}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "==> 删除已有 Release $TAG"
+            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          else
+            echo "==> 没有旧 Release"
+          fi
+
+      - name: 发布 Release
+        if: ${{ !inputs.skip_publish }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.ver.outputs.tag }}"
+          cat > /tmp/notes.md <<EOF
+          ## ImmortalWrt ${TAG} · x86_64 · UEFI
+
+          上游仓库：\`immortalwrt/immortalwrt\`，tag \`${TAG}\`
+          构建时间：$(date -u '+%Y-%m-%d %H:%M UTC')
+          构建人：@${{ github.actor }}
+
+          ### 版本号说明
+          本 Release 的 tag 与上游 tag 一致（\`${TAG}\`），可直接对应上游发布版本。
+          固件文件名中的版本号由编译产物决定，实际见下方附件。
+
+          ### 产物（共 2 个）
+          | 文件 | 说明 |
+          |---|---|
+          | \`*-ext4-combined-efi.img.gz\` | 普通版，出厂默认配置 |
+          | \`*-ext4-combined-efi-preconfigured.img.gz\` | 预配置版，额外带初始网络/租约/转发/UPnP |
+
+          ### 两个镜像都包含
+          - 默认简体中文界面
+          - 默认 Argon 主题（含主题设置页）
+          - UPnP（miniupnpd-nftables）
+          - OpenClash（官方包）+ Mihomo Meta 内核 + 四个数据库（预置，无需联网下载）
+          - 已移除「挂载点」菜单
+          - 仅保留 igc（i225/i226）等必要网卡驱动
+
+          ### 预配置版额外内容
+          - LAN \`192.168.1.1/24\`，DHCP 池 \`.100-.199\`，租期 12h
+          - WAN 为 PPPoE 模板（账号密码留空）
+          - 4 条静态租约、5 条端口转发（指向 \`192.168.88.254\`）
+          - UPnP 开启，时区 Asia/Shanghai
+
+          > 静态租约与端口转发写的是 \`192.168.88.x\`，只有 LAN 处于 \`192.168.88.0/24\` 时才生效。
+          > 把 LAN 改为 \`192.168.88.1\` 后立即生效。
+
+          ### 校验值
+          见本次构建日志的 \`Checksums\` 步骤。
+
+          ### 刷写
+          1. 解压 \`.img.gz\` 得到 \`.img\`
+          2. Etcher / Rufus / \`dd\` 写入 U 盘或 SSD
+          3. **UEFI** 引导（本仓库不编译 BIOS/Legacy 镜像）
+          4. 网线接 LAN 口，浏览器打开 \`http://192.168.1.1\`
+          5. 首次登录必须设置 root 密码
+          EOF
+          gh release create "$TAG" release-out/*.img.gz \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "ImmortalWrt ${TAG} · x86_64" \
+            --notes-file /tmp/notes.md
+          echo "==> 已发布"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY"
