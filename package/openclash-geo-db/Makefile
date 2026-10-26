@@ -47,59 +47,14 @@ define Package/$(PKG_NAME)/description
   编译期从 MetaCubeX/meta-rules-dat 官方 release 下载并预置到 /etc/openclash/。
 endef
 
-# fetch <远端文件> <本地路径>：直连 -> 加速 -> 再直连
 define Build/Prepare
 	mkdir -p $(PKG_BUILD_DIR)/out
-	rm -rf $(PKG_BUILD_DIR)/out/*
-
-	@fetch() { \
-		for u in "$(DIRECT)/$$1" "$(MIRROR)/$$1" "$(DIRECT)/$$1"; do \
-			echo "==> 下载 $$1  <-  $$u"; \
-			if curl -fL --retry 2 --retry-delay 3 --connect-timeout 20 --max-time 600 -o "$$2" "$$u"; then \
-				[ -s "$$2" ] && return 0; \
-			fi; \
-			rm -f "$$2"; \
-		done; \
-		echo "!! $$1 所有通道均失败"; return 1; \
-	}; \
-	fetch country.mmdb       $(PKG_BUILD_DIR)/out/Country.mmdb  || exit 1; \
-	fetch geosite.dat        $(PKG_BUILD_DIR)/out/GeoSite.dat   || exit 1; \
-	fetch geoip.dat          $(PKG_BUILD_DIR)/out/GeoIP.dat     || exit 1; \
-	fetch GeoLite2-ASN.mmdb  $(PKG_BUILD_DIR)/out/ASN.mmdb      || exit 1
-
-	@# 体积下限（按 2026-10 实测值的一半给，留出上游瘦身余量但仍能挡住桩文件）
-	@for spec in "Country.mmdb 3000000" "GeoSite.dat 1500000" "GeoIP.dat 5000000" "ASN.mmdb 3000000"; do \
-		set -- $$spec; \
-		f="$(PKG_BUILD_DIR)/out/$$1"; min=$$2; \
-		[ -s "$$f" ] || { echo "!! $$1 缺失或为空"; exit 1; }; \
-		sz=$$(stat -c '%s' "$$f"); \
-		if [ "$$sz" -lt "$$min" ]; then \
-			echo "!! $$1 只有 $$sz 字节，低于下限 $$min（疑似桩文件或错误页）"; exit 1; \
-		fi; \
-		printf '    %-16s %10s 字节\n' "$$1" "$$sz"; \
-	done
-
-	@# sha256 校验：上游每个文件都带 .sha256sum，能取到就强制校验
-	@for spec in "Country.mmdb country.mmdb" "GeoSite.dat geosite.dat" "GeoIP.dat geoip.dat" "ASN.mmdb GeoLite2-ASN.mmdb"; do \
-		set -- $$spec; local=$$1; remote=$$2; \
-		want=""; \
-		for u in "$(DIRECT)/$$remote.sha256sum" "$(MIRROR)/$$remote.sha256sum"; do \
-			want=$$(curl -fsSL --retry 2 --connect-timeout 20 "$$u" 2>/dev/null | awk '{ print $$1 }' | head -1); \
-			[ -n "$$want" ] && break; \
-		done; \
-		if [ -n "$$want" ]; then \
-			got=$$(sha256sum "$(PKG_BUILD_DIR)/out/$$local" | awk '{ print $$1 }'); \
-			if [ "$$want" != "$$got" ]; then \
-				echo "!! $$local sha256 校验失败"; echo "   want $$want"; echo "   got  $$got"; exit 1; \
-			fi; \
-			echo "    $$local sha256 OK"; \
-		else \
-			echo "    $$local 上游未提供 sha256sum，跳过校验"; \
-		fi; \
-	done
-
-	ls -lh $(PKG_BUILD_DIR)/out
-	echo "==> 四个数据库就绪"
+	@# 真正的取数/校验逻辑在 fetch.sh 里。
+	@# 千万不要写回 Makefile：Prepare 段带 @ 前缀时 package.mk 会把整段 recipe
+	@# 压成一行交给 bash -c，里面一旦有引号嵌套或函数定义，就会
+	@# "unexpected EOF while looking for matching `'`"，且变量全空、
+	@# 报错完全没有指向性（实测整机编译 76 分钟才红在这里）。
+	sh ./fetch.sh "$(PKG_BUILD_DIR)" "$(DIRECT)" "$(MIRROR)"
 endef
 
 define Build/Compile

@@ -24,6 +24,7 @@ PKG_MAINTAINER:=ImmortalWrt-AutoBuild
 include $(INCLUDE_DIR)/package.mk
 
 REPO:=MetaCubeX/mihomo
+MIHOMO_FALLBACK:=v1.19.33
 
 define Package/$(PKG_NAME)
 	SECTION:=net
@@ -41,55 +42,12 @@ endef
 define Build/Prepare
 	mkdir -p $(PKG_BUILD_DIR)
 	rm -f $(PKG_BUILD_DIR)/clash_meta $(PKG_BUILD_DIR)/mihomo.gz
-
-	@# 1) 解析最新 tag：API -> releases/latest 重定向 -> 兜底 v1.19.33
-	@tag=$$(curl -fsSL --retry 3 --connect-timeout 20 -H 'Accept: application/vnd.github+json' \
-		https://api.github.com/repos/$(REPO)/releases/latest 2>/dev/null \
-		| sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1); \
-	if [ -z "$$tag" ]; then \
-		tag=$$(curl -fsSIL --retry 2 --connect-timeout 20 -o /dev/null -w '%{url_effective}' \
-			https://github.com/$(REPO)/releases/latest 2>/dev/null | sed 's|.*/tag/||'); \
-	fi; \
-	[ -n "$$tag" ] || { echo "!! 无法解析 mihomo 最新 tag"; exit 1; }; \
-	echo "==> mihomo tag: $$tag"; \
-	case "$$tag" in v*) fname="mihomo-linux-amd64-$$tag.gz"; vdir="$$tag" ;; \
-		*) fname="mihomo-linux-amd64-v$$tag.gz"; vdir="v$$tag" ;; esac; \
-	url1="https://github.com/$(REPO)/releases/download/$$vdir/$$fname"; \
-	url2="https://gh-proxy.com/https://github.com/$(REPO)/releases/download/$$vdir/$$fname"; \
-	ok=0; \
-	for u in "$$url1" "$$url2" "$$url1"; do \
-		echo "==> 下载 $$u"; \
-		if curl -fL --retry 2 --retry-delay 3 --connect-timeout 20 --max-time 900 \
-			-o $(PKG_BUILD_DIR)/mihomo.gz "$$u" && [ -s $(PKG_BUILD_DIR)/mihomo.gz ]; then \
-			ok=1; break; \
-		fi; \
-		rm -f $(PKG_BUILD_DIR)/mihomo.gz; \
-	done; \
-	if [ "$$ok" != 1 ]; then \
-		echo "!! 内核下载失败，列出 release 资产："; \
-		curl -fsSL -H 'Accept: application/vnd.github+json' \
-			https://api.github.com/repos/$(REPO)/releases/latest \
-			| tr ',' '\n' | grep browser_download_url | grep 'linux-amd64' | sed 's/.*"\(https[^"]*\)".*/   \1/'; \
-		exit 1; \
-	fi; \
-	echo "$$tag" > $(PKG_BUILD_DIR)/version.txt; \
-	ls -lh $(PKG_BUILD_DIR)/mihomo.gz
-
-	@# 2) gzip 完整性 + 解压 + 体积
-	gzip -t $(PKG_BUILD_DIR)/mihomo.gz || { echo "!! gzip 完整性校验失败"; exit 1; }
-	gzip -dc $(PKG_BUILD_DIR)/mihomo.gz > $(PKG_BUILD_DIR)/clash_meta
-	chmod 0755 $(PKG_BUILD_DIR)/clash_meta
-	@sz=$$(stat -c '%s' $(PKG_BUILD_DIR)/clash_meta); \
-	echo "==> 解压后 $$sz 字节"; \
-	[ "$$sz" -gt 20000000 ] || { echo "!! 内核体积异常（<20MB），可能是错误页或被截断"; exit 1; }
-
-	@# 3) 在构建机上真跑一次 -v：确认拿到的是可执行文件而不是 HTML
-	@echo "==> 试跑 clash_meta -v"
-	@$(PKG_BUILD_DIR)/clash_meta -v || { echo "!! clash_meta 无法执行"; exit 1; }
-
-	@mkdir -p $(PKG_BUILD_DIR)/root/etc/openclash/core
-	@cp $(PKG_BUILD_DIR)/clash_meta $(PKG_BUILD_DIR)/root/etc/openclash/core/clash_meta
-	@cp $(PKG_BUILD_DIR)/version.txt $(PKG_BUILD_DIR)/root/etc/openclash/core/mihomo.version
+	@# 真正的取数/校验逻辑在 fetch.sh 里。
+	@# 不要把这些逻辑写回 Makefile：Prepare 段带 @ 前缀时，package.mk 会把
+	@# 整段 recipe 压成一行交给 bash -c，里面只要出现单引号（如 curl 的
+	@# -H 'Accept: ...'）就会 "unexpected EOF while looking for matching `'`，
+	@# 而且变量全空、报错完全没有指向性（实测整机编译 76 分钟才红在这里）。
+	sh ./fetch.sh "$(PKG_BUILD_DIR)" "$(REPO)" "$(MIHOMO_FALLBACK)"
 endef
 
 define Build/Compile
