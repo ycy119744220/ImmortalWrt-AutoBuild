@@ -1,0 +1,25 @@
+#!/bin/sh
+# 两个镜像共用：确保 Argon 为默认主题、界面语言锁定为简体中文
+#
+# ImmortalWrt 的 luci-theme-argon 自带 30_luci-theme-argon，本脚本排在它之后兜底执行，
+# 覆盖「用户之前手动改过主题」「升级固件后主题回退」两种情况。
+# 主题设置本身（/etc/config/argon）由主题包提供，这里只动选中的主题与语言。
+
+uci -q get luci.themes.Argon >/dev/null 2>&1 || uci set luci.themes.Argon='/luci-static/argon'
+uci set luci.main.mediaurlbase='/luci-static/argon'
+
+# 语言代号由本次构建实际生成的语言包决定（25.x 为 zh_Hans，旧版为 zh_CN）
+lang=""
+for d in /usr/lib/lua/luci/i18n /usr/share/ucode/luci/i18n; do
+	[ -d "$d" ] || continue
+	lang=$(ls "$d" 2>/dev/null | grep -oE 'zh[-_][A-Za-z0-9]+' | head -1)
+	[ -n "$lang" ] && break
+done
+if [ -n "$lang" ]; then
+	uci set luci.main.lang="$lang"
+else
+	uci set luci.main.lang='zh_cn'
+fi
+
+uci commit luci
+exit 0
