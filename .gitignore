@@ -1,11 +1,16 @@
 # 生成物
 release-out/
 build.log
+download.log
 *.img
 *.img.gz
 
 # 本地编译产物
 openwrt/
+
+# Python 缓存
+__pycache__/
+*.pyc
 
 # 编辑器
 .vscode/

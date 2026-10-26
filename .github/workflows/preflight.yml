@@ -70,23 +70,38 @@ jobs:
         run: |
           set -euo pipefail
           cd openwrt
-          set -o pipefail
           # 说明：`make package/xxx/compile` 不会自动补齐 tools/ 与 toolchain/，
           # 会依次踩到：
           #   - 缺 staging_dir/host/bin/libdeflate-gzip → 解压失败
           #   - 缺 staging_dir/toolchain-*/lib/libgcc_s.so → libgcc 打包失败
           # 这里显式按依赖顺序补齐，比裸 make world 快很多（不编内核）。
-          echo "=== 1/3 tools/install ==="
-          make -j"$(nproc)" tools/install 2>&1 | tail -10
+          #
+          # ⚠ 日志策略（血泪）：
+          #   千万不要 `make ... V=s 2>&1 | tee /tmp/x.log`。
+          #   tools/install + toolchain/install 在 V=s 下能刷出上 GB 日志，
+          #   一边跑一边被 Actions 落盘（外加 tee 再写一份），IO 打满后
+          #   整个步骤能从 20 分钟拖到 60 分钟以上还不结束（实测卡死过一次）。
+          #   正确做法：日志写文件，成功不打印，失败只打印尾部。
+          run_log() {
+            name=$1; shift
+            echo "=== $name ==="
+            if "$@" >"/tmp/$name.log" 2>&1; then
+              echo "    OK（日志 $(wc -l </tmp/$name.log) 行）"
+            else
+              echo "!! $name 失败，日志尾部 200 行："
+              tail -200 "/tmp/$name.log"
+              return 1
+            fi
+          }
+
+          run_log tools     make -j"$(nproc)" tools/install
           test -x staging_dir/host/bin/libdeflate-gzip
 
-          echo "=== 2/3 toolchain/install ==="
-          make -j"$(nproc)" toolchain/install 2>&1 | tail -30
+          run_log toolchain make -j"$(nproc)" toolchain/install
           ls -1 staging_dir/toolchain-*/lib/libgcc_s.so* >/dev/null
 
-          echo "=== 3/3 两个本地包 ==="
-          make -j"$(nproc)" package/openclash-core-meta/compile V=s 2>&1 | tee /tmp/core.log
-          make -j"$(nproc)" package/openclash-geo-db/compile V=s 2>&1 | tee /tmp/geo.log
+          run_log core      make -j"$(nproc)" package/openclash-core-meta/compile V=s
+          run_log geo       make -j"$(nproc)" package/openclash-geo-db/compile V=s
 
       - name: 检查两个本地包的产出
         run: |
@@ -124,6 +139,8 @@ jobs:
           name: preflight-debug
           path: |
             openwrt/.config
+            /tmp/tools.log
+            /tmp/toolchain.log
             /tmp/core.log
             /tmp/geo.log
           if-no-files-found: warn
