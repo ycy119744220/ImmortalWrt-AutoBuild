@@ -83,38 +83,43 @@ jobs:
             python3 -m py_compile "$s" && echo "    OK  $s"
           done
 
-          echo "==> 两个本地包的 Makefile 能被 OpenWrt 正确解析"
-          # 两个坑都踩过，写清楚免得后人再踩：
-          #   1) `make package/<pkg>/dump` —— package/Makefile 根本没这个目标，
-          #      会落到 toplevel.mk 的兜底规则 `%::`，报一句毫无信息量的
-          #      "make -r package/xxx/dump: build failed. Please re-run make with -j1 V=s"。
-          #   2) `make -C package/<pkg> DUMP=1` —— TOPDIR 不会被导出，
-          #      于是 include 变成 "/package.mk: No such file or directory"。
-          #
-          # 正确姿势：在 openwrt/ 根目录执行 `make package/<目录名>/compile DUMP=1`。
-          #   - TOPDIR 由顶层 Makefile 第 5 行 `TOPDIR:=${CURDIR}` 定义并 export，
-          #     只有走顶层才会被导出；直接 `make -C package/xxx` 会让 TOPDIR 为空，
-          #     include 变成 "/package.mk: No such file or directory"（实测踩过）。
-          #   - DUMP=1 时 include/package.mk 的 `all` 目标变成 dumpinfo，
-          #     只导出元数据，不下载、不编译。
-          #   - 目标是目录名（openclash-core-meta），不是 Package 名，二者这里恰好相同。
+          echo "==> 两个本地包的 Makefile 关键字段"
+          # 不调用 make。
+          # 试过三种 make 姿势，全部不可靠：
+          #   1) `make package/<pkg>/dump`      → package/Makefile 没这个目标，
+          #      落到 toplevel.mk 的 `%::` 兜底规则，只报 "build failed. Please re-run make -j1 V=s"。
+          #   2) `make -C package/<pkg> DUMP=1` → TOPDIR 未导出，
+          #      include 变成 "/package.mk: No such file or directory"。
+          #   3) `make package/<pkg>/compile DUMP=1`（在 openwrt 根目录）→ 确实进了 dumpinfo，
+          #      但仍会先跑 target/linux/prereq，而 ARCH 还没从 .config 载入，
+          #      报 "prereq: No such file or directory"，staging_dir 出现 target-_ 这种空 ARCH 目录。
+          # 结论：preflight 阶段（toolchain 尚未构建）不适合让 make 解析包。
+          # 真正能编译通过与否，由 build.yml 的完整 make 负责；这里只做确定性最高的静态检查。
           for dir in openclash-core-meta openclash-geo-db; do
-            out=$(cd openwrt && make "package/$dir/compile" DUMP=1 2>&1) || {
-              echo "!! $dir 解析失败："; echo "$out" | tail -40; exit 1
+            mk="openwrt/package/$dir/Makefile"
+            [ -f "$mk" ] || { echo "!! 缺少 $mk"; exit 1; }
+
+            # PKG_NAME 必须等于目录名，否则 CONFIG_PACKAGE_<name>=y 选不中它
+            name=$(sed -n 's/^PKG_NAME:=//p' "$mk" | head -1 | tr -d ' \t')
+            [ "$name" = "$dir" ] || {
+              echo "!! $dir 的 PKG_NAME=$name，与目录名不一致（CONFIG_PACKAGE_$name 才对）"
+              exit 1
             }
-            # dumpinfo 输出的第一段就是主包，形如：
-            #   Package: openclash-core-meta
-            #   Version: 1.0-1
-            #   Depends: +luci-app-openclash
-            pkg=$(printf '%s\n' "$out" | sed -n 's/^Package: //p' | head -1)
-            [ -n "$pkg" ] || {
-              echo "!! $dir 没有导出任何 Package 字段，实际输出："
-              echo "$out" | tail -40; exit 1
+
+            # 必须注册成包，否则不会被编进固件
+            grep -q 'BuildPackage,' "$mk" || { echo "!! $mk 没有调用 BuildPackage"; exit 1; }
+            # 必须有 install 段，否则包装出来是空的
+            # install 段通常写作 `define Package/$(PKG_NAME)/install`（用变量），
+            # 也允许写死包名，两种都算通过
+            grep -qE "define Package/(\\$\(PKG_NAME\)|$dir)/install" "$mk" || {
+              echo "!! $mk 没有 install 段"; exit 1
             }
-            deps=$(printf '%s\n' "$out" | sed -n 's/^Depends: //p' | head -1)
-            echo "    OK  $dir -> Package: $pkg"
-            echo "        depends: ${deps:-（无）}"
+
+            deps=$(sed -n 's/^[[:space:]]*DEPENDS:=\(.*\)$/\1/p' "$mk" | head -1)
+            echo "    OK  $dir  (PKG_NAME=$name)"
+            echo "        DEPENDS: ${deps:-（无）}"
           done
+          echo "    （以上为静态解析；能否真正编译由 build.yml 的完整 make 决定）"
 
       - name: 下载并校验内核 + 四个数据库（与包 Makefile 同一套规则）
         run: |
