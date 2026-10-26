@@ -37,7 +37,7 @@ jobs:
     timeout-minutes: 350
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: 解析上游 tag
         id: ver
@@ -129,7 +129,7 @@ jobs:
 
       - name: 上传编译日志（仅失败时）
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: build-log-${{ steps.ver.outputs.tag }}
           path: build.log
@@ -149,7 +149,7 @@ jobs:
         run: ./scripts/collect.sh "${{ steps.ver.outputs.tag }}" release-out
 
       - name: 保存 .config 作为 artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: config-${{ steps.ver.outputs.tag }}
           path: openwrt/.config

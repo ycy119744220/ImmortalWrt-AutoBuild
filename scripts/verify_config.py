@@ -14,7 +14,8 @@ import sys
 # 必须进固件
 MUST_Y = [
     ("目标平台", ["TARGET_x86", "TARGET_x86_64"]),
-    ("简体中文 / Argon 主题", ["LUCI_LANG_zh_Hans", "PACKAGE_luci-theme-argon"]),
+    ("简体中文 / Argon 主题",
+     ["LUCI_LANG_zh_Hans", "PACKAGE_luci-theme-argon", "PACKAGE_luci-app-argon-config"]),
     ("UPnP", ["PACKAGE_luci-app-upnp", "PACKAGE_miniupnpd-nftables"]),
     ("OpenClash（官方包 + 本仓库内核/数据库包）",
      ["PACKAGE_luci-app-openclash", "PACKAGE_openclash-core-meta", "PACKAGE_openclash-geo-db"]),

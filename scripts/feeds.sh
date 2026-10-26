@@ -28,15 +28,21 @@ echo "==> 安装官方 feeds（packages / luci / routing / telephony / video）"
 ./scripts/feeds install -a
 
 echo "==> 校验关键包确实来源于官方 feed"
+# 坑：`feeds list -r <名字>` 里的 -r 是「限定 feed 名」（luci/packages/...），
+# 不是包名。把包名传进去会导致搜索范围为 0，永远返回空 —— 曾经的写法就是这样
+# 误报「官方 feed 里没有 luci-theme-argon」。
+# 正确做法：feeds list 的每一行是「包名<TAB>描述」，直接按第一列精确匹配。
+./scripts/feeds list 2>/dev/null | awk -F'\t' '{print $1 "\t" $2}' > /tmp/feeds_list.tsv
 for p in luci-theme-argon luci-app-upnp luci-app-openclash; do
-	src=$(./scripts/feeds list -r "$p" 2>/dev/null || true)
-	if [ -z "$src" ]; then
+	line=$(awk -F'\t' -v k="$p" '$1==k{print; exit}' /tmp/feeds_list.tsv)
+	if [ -n "$line" ]; then
+		echo "    OK  ${line/#$'\t'/  }"
+	else
 		echo "!! 官方 feed 里没有 $p"
 		echo "   已安装的相关包："
-		./scripts/feeds list 2>/dev/null | grep -iE 'argon|upnp|openclash' || true
+		cut -f1 /tmp/feeds_list.tsv | grep -iE 'argon|upnp|openclash' || true
 		exit 1
 	fi
-	echo "    $p -> $src"
 done
 
 echo "==> 放置本仓库的本地包（OpenClash Meta 内核 + 4 个数据库）"
