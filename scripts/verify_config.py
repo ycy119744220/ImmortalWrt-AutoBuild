@@ -28,7 +28,13 @@ MUST_Y = [
 
 # 必须关闭
 MUST_N = [
-    ("挂载点（Mount Points）", ["PACKAGE_luci-app-fstab", "PACKAGE_block-mount"]),
+    # 挂载点（用户明确要求移除）。
+    # block-mount 同时受 CONFIG_PACKAGE_* 和 x86 目标的 DEFAULT_PACKAGES 控制，
+    # 只关 CONFIG_PACKAGE_block-mount 会被 CONFIG_DEFAULT_block-mount 重新拉回来，
+    # 所以两条都要查。automount 显式 DEPENDS:+block-mount，一并关掉。
+    ("挂载点（Mount Points）",
+     ["PACKAGE_luci-app-fstab", "PACKAGE_block-mount", "PACKAGE_automount",
+      "DEFAULT_block-mount", "DEFAULT_automount"]),
     ("性能开关", ["RUBY_ENABLE_YJIT"]),
     ("产物类型", ["TARGET_ROOTFS_SQUASHFS", "GRUB_IMAGES"]),
 ]
