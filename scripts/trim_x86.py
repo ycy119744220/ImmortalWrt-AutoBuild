@@ -58,6 +58,13 @@ def trim_device_packages(path: Path) -> int:
     removed, kept = [], []
     for tok in tokens:
         name = tok.lstrip("-")
+        # 挂载点相关包在 DEVICE_PACKAGES 里也可能显式出现（实测 64.mk 里就有 block-mount），
+        # 它们不是 kmod- 前缀，早先只按 kmod- 过滤会把 block-mount 原样留下，
+        # 结果"DEFAULT_PACKAGES 删掉了 automount"却仍被 DEVICE_PACKAGES 拉回 block-mount，
+        # 挂载点功能照样进固件。这里必须一并剔除。
+        if name in DROP_DEFAULT:
+            removed.append(name)
+            continue
         if name.startswith("kmod-"):
             if name in KEEP:
                 kept.append(tok)
@@ -78,6 +85,13 @@ def trim_device_packages(path: Path) -> int:
 
     print(f"==> [驱动] 保留 {len(kept)} 项：{' '.join(kept)}")
     print(f"==> [驱动] 移除 {len(removed)} 个：{' '.join(removed) if removed else '(无)'}")
+
+    # 硬性断言：改写后的 DEVICE_PACKAGES 里不允许再出现挂载点相关包。
+    # 早先这里只 print 不检查，block-mount 一路混进固件都没人发现。
+    leftover = [t for t in kept if t.lstrip("-") in DROP_DEFAULT]
+    if leftover:
+        print(f"!! DEVICE_PACKAGES 里仍残留挂载点包：{' '.join(leftover)}")
+        return 1
 
     # 注意：kmod-igc / kmod-e1000e 在 target Makefile 的 DEFAULT_PACKAGES 里，
     # 不在 64.mk 的 DEVICE_PACKAGES 中，这里不做存在性断言（早先的断言是误报）。

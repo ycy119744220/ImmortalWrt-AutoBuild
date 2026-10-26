@@ -78,12 +78,14 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
 6. **Ruby YJIT 拖慢 2 小时**：x86_64 上 `RUBY_ENABLE_YJIT` 默认 `=y`，会先编 `rust/host`，rustc 再编一遍 LLVM。`config/ci-extra.config` 已关闭。
 7. **配置校验脚本曾长期"假通过"**：`verify_config.py` 的前几版用 awk/grep 实现，连环踩了四个隐式行为坑 —— `index()` 前缀误判、mawk 把 `luci-theme-argon` 当算术表达式、`key` 是 mawk 内置函数名、`CONFIG` 是 bash 保留变量会被读成空。表现为**所有检查一律 WARN 放行**，看着"通过"其实什么都没验。现改为 Python 逐行字符串比较，并用「正例全绿 + 反例必须报 FAIL」双向验证过。
 8. **`feeds list -r` 的 `-r` 不是包名**：它是「限定 feed 名」（`luci`/`packages`/…）。传包名进去搜索范围为 0，永远返回空，会误报「官方 feed 里没有 luci-theme-argon」。另外 `feeds list` 的输出格式是 `printf "%-32s\t%s\n"`，**包名被补齐到 32 字符后才跟 TAB**，按 `$1==包名` 精确比较会因尾部空格失败 —— 必须先 `gsub` 掉尾部空白。两个坑叠在一起，排查花了三轮 CI。
-9. **`block-mount` 压不住**：x86 目标的 `DEFAULT_PACKAGES` 自带 `block-mount`，会在 `defconfig` 时无条件拉回，只写 `CONFIG_PACKAGE_block-mount=n` 是**无效**的（实测 FAIL）。必须同时写 `# CONFIG_DEFAULT_block-mount is not set`。`automount` 显式 `DEPENDS:+block-mount`，也要一起关。
+9. **`block-mount` 有两处入口，只堵一处不够**：x86 目标的 `DEFAULT_PACKAGES` 自带 `automount`（`DEPENDS:+block-mount`），`image/64.mk` 的 `DEVICE_PACKAGES` 里又显式写了 `block-mount`。只写 `CONFIG_PACKAGE_block-mount=n` 无效（见第 13 条），而 `trim_x86.py` 早期版本只从 `DEFAULT_PACKAGES` 删 `automount`、按 `kmod-` 前缀过滤 `DEVICE_PACKAGES`，于是**非 kmod 的 `block-mount` 被原样保留、照样进固件**。现在两处都删，并加了回读断言：改写后若仍残留 `block-mount`/`automount` 直接 `return 1`。
 10. **`python3-distutils` 在 Ubuntu 24.04 已被移除**（Python 3.12 删掉 distutils）。混在 `apt-get install` 主列表里会让整步以 `exit 100` 失败，需单独 `|| true` 容错安装。
 11. **`actions/checkout@v4`、`upload-artifact@v4` 跑在 Node 20 上**，GitHub 会报 Node.js 20 deprecated 警告。已全部升到 v7（`using: node24`）。
 12. **匿名调用 GitHub API 会撞 403**：解析上游 tag 时原本是裸 `curl`，共享 runner IP 只有 60 次/小时匿名额度，一撞上就 `curl: (22) ... error: 403`，整条流水线直接红。现统一走 `scripts/resolve_tag.sh`：带 `GITHUB_TOKEN` 认证（5000 次/小时），失败自动退回 `git ls-remote --tags`（完全不受 API 限流影响），两条都挂才报错。
 13. **`CONFIG_DEFAULT_*` 在 `.config` 里关不掉**：`target-metadata.pl` 生成的是**没有 default 的纯 bool**，由 `TARGET_DEVICE_*` 通过 `select DEFAULT_block-mount` 强制打开。写 `# CONFIG_DEFAULT_block-mount is not set` 会被 `select` 立刻覆盖回来（实测两轮 CI 均 FAIL）。唯一可靠做法是改 `target/linux/x86/Makefile` 的 `DEFAULT_PACKAGES` —— 已由 `trim_x86.py` 的 `drop_mount_packages()` 处理。校验器里 `DEFAULT_*` 只作 NOTE，不做失败判定。
-14. **单编包前必须先 `make tools/install`**：直接 `make package/xxx/compile` 会跳过 `tools/` 构建，解压源码时找不到 `staging_dir/host/bin/libdeflate-gzip`，报 `libdeflate-gzip: No such file or directory` + `This does not look like a tar archive`，看着像网络下载失败，其实是 host 工具链没建。只有 preflight 这种"只编单个包"的场景会踩到，真实构建走完整流程不受影响。
+14. **单编包前必须先 `make tools/install`**：直接 `make package/xxx/compile` 会跳过 `tools/` 构建，解压源码时找不到 `staging_dir/host/bin/libdeflate-gzip`，报 `libdeflate-gzip: No such file or directory` + `This does not look like a tar archive`，看着像网络下载失败，其实是 host 工具链没建。同理 `toolchain/install` 也不能省，否则 `package/libs/toolchain` 找不到 `libgcc_s.so.*` 而失败。只有 preflight 这种"只编单个包"的场景会踩到，真实构建走完整流程不受影响。
+15. **`make ... V=s 2>&1 | tee log` 会把步骤拖死**：`tools/install` + `toolchain/install` 在 `V=s` 下能刷出上 GB 日志，`tee` 让每行同时"写文件 + 写 stdout"，Actions 端还要再落一次盘，IO 打满后整步能从 20 分钟拖到 60 分钟以上不结束（实测卡死过一次，只能取消）。现在统一改为**日志落文件、成功不打印、失败只回放尾部 N 行**，整机编译那步同样处理。
+16. **`tar -tvzf` 的 `$3` 不一定是体积**：属主名超过 8 字符时 tar 会改印 `uid/gid`，字段整体右移一位，`awk '{print $3}'` 就拿不到体积 —— 表现为"文件明明 16MB 却报 0 字节"。`verify_firmware.sh` 已加 `--numeric-owner` 固定格式。
 
 实测数值（2026-10）：内核下载 22MB → 解压 62MB；Country.mmdb 7.6MB、GeoSite.dat 4.3MB、GeoIP.dat 16.5MB、ASN.mmdb 9.0MB。下载走 `github.com` 直连，失败自动切 `gh-proxy.com` 加速再回退直连（三通道重试）。
 
@@ -91,7 +93,7 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
 
 任一失败都会让 job 变红、不发 Release：
 
-1. `verify_config.py`：Argon 主题 + 设置工具 / 中文 / UPnP / OpenClash 三件套 / 依赖必须 `=y`；`luci-app-fstab`、`block-mount`、`automount`、`DEFAULT_block-mount`、`DEFAULT_automount`、`RUBY_ENABLE_YJIT` 必须关闭。**符号不存在只告警不失败**（kconfig 对未被引用的符号不写任何行）。
+1. `verify_config.py`：Argon 主题 + 设置工具 / 中文 / UPnP / OpenClash 三件套 / 依赖必须 `=y`；`luci-app-fstab`、`block-mount`、`automount`、`RUBY_ENABLE_YJIT` 必须关闭。`DEFAULT_block-mount` / `DEFAULT_automount` 只打 `NOTE` 不计失败（它们是 `select` 强制项，`.config` 里改不动，实际靠 `trim_x86.py` 改 target Makefile）。**符号不存在只告警不失败**（kconfig 对未被引用的符号不写任何行）。
 2. `verify_firmware.sh`：rootfs 里必须真有 Argon 资源、中文语言包、`clash_meta`（>20MB）、四个库（体积下限）、首启脚本 755；普通版不得含预配置脚本。
 3. `make_preconfigured.sh`：注入后必须能在镜像里定位 rootfs 分区（靠 `/etc/openwrt_release` 而非 `/dev/ 第一个 ext4`）、`90-preconfigured` 权限 755，gzip 完整性通过。
 4. `make` 全程 `set -o pipefail`，失败即红并上传 `build.log`。

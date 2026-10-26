@@ -31,7 +31,9 @@ has() { # has <路径>
 
 size_of() { # size_of <路径> <下限字节>
 	local p=$1 min=$2 sz
-	sz=$(tar -tvzf "$ROOTFS" --wildcards "./$p" 2>/dev/null | awk 'NR==1 { print $3 }')
+	# --numeric-owner 必须加：tar -tv 在属主名 >8 字符时会改印 uid/gid，
+	# 字段整体右移一位，$3 就不再是体积，于是"文件明明 16MB 却报 0 字节"。
+	sz=$(tar -tvzf "$ROOTFS" --numeric-owner --wildcards "./$p" 2>/dev/null | awk 'NR==1 { print $3 }')
 	sz=${sz:-0}
 	if [ "$sz" -lt "$min" ]; then
 		printf '    FAIL    %s 只有 %s 字节（下限 %s）\n' "$p" "$sz" "$min"
@@ -62,10 +64,13 @@ echo "==> OpenClash Meta 内核（必须可执行、非空）"
 size_of etc/openclash/core/clash_meta 20000000 || true
 
 echo "==> OpenClash 四个数据库（体积下限拦住桩文件）"
-size_of etc/openclash/Country.mmdb 1000000 || true
-size_of etc/openclash/GeoSite.dat 2000000 || true
-size_of etc/openclash/GeoIP.dat 500000 || true
-size_of etc/openclash/ASN.mmdb 100000 || true
+# 下限必须与 package/openclash-geo-db/Makefile 里的判定基本一致。
+# 官方 luci-app-openclash 自带的桩文件是 Country.mmdb 205KB、GeoSite.dat 10MB(旧快照)，
+# 所以 GeoSite.dat 的下限必须显著高于 205KB 才拦得住「装了但没用」的情况。
+size_of etc/openclash/Country.mmdb 3000000 || true
+size_of etc/openclash/GeoSite.dat 1500000 || true
+size_of etc/openclash/GeoIP.dat 5000000 || true
+size_of etc/openclash/ASN.mmdb 3000000 || true
 
 echo "==> 挂载点必须不存在"
 if grep -qE 'luci-app-fstab|/usr/share/rpcd/acl.d/luci-app-fstab' "$LIST"; then
