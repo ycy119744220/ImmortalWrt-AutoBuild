@@ -28,15 +28,19 @@ echo "==> 安装官方 feeds（packages / luci / routing / telephony / video）"
 ./scripts/feeds install -a
 
 echo "==> 校验关键包确实来源于官方 feed"
-# 坑：`feeds list -r <名字>` 里的 -r 是「限定 feed 名」（luci/packages/...），
-# 不是包名。把包名传进去会导致搜索范围为 0，永远返回空 —— 曾经的写法就是这样
-# 误报「官方 feed 里没有 luci-theme-argon」。
-# 正确做法：feeds list 的每一行是「包名<TAB>描述」，直接按第一列精确匹配。
-./scripts/feeds list 2>/dev/null | awk -F'\t' '{print $1 "\t" $2}' > /tmp/feeds_list.tsv
-for p in luci-theme-argon luci-app-upnp luci-app-openclash; do
+# 两个坑叠在一起，都踩过：
+#  1) `feeds list -r <名字>` 的 -r 是「限定 feed 名」（luci/packages/...），不是包名。
+#     传包名进去搜索范围为 0，永远返回空 —— 曾误报「官方 feed 里没有 luci-theme-argon」。
+#  2) `feeds list` 的输出格式是 printf "%-32s\t%s\n"，包名被补齐到 32 字符后才跟 TAB，
+#     所以按 $1==包名 精确比较会因尾部空格失败。必须先 trim。
+./scripts/feeds list 2>/dev/null \
+	| awk -F'\t' '{gsub(/[[:space:]]+$/, "", $1); if ($1 != "") print $1 "\t" $2}' \
+	> /tmp/feeds_list.tsv
+echo "    （官方 feed 共 $(wc -l </tmp/feeds_list.tsv) 个包）"
+for p in luci-theme-argon luci-app-argon-config luci-app-upnp luci-app-openclash; do
 	line=$(awk -F'\t' -v k="$p" '$1==k{print; exit}' /tmp/feeds_list.tsv)
 	if [ -n "$line" ]; then
-		echo "    OK  ${line/#$'\t'/  }"
+		echo "    OK  $(printf '%s' "$line" | sed 's/\t/  /')"
 	else
 		echo "!! 官方 feed 里没有 $p"
 		echo "   已安装的相关包："
