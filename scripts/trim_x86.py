@@ -14,25 +14,33 @@
    会照着 DEFAULT_PACKAGES 重新拉回来（实测两轮 CI 都 FAIL）。
    唯一可靠的办法是直接改 target Makefile。
 
-KEEP 只留 x86 软路由真正会用到的：i225/i226(igc)、virtio、e1000/e1000e（部分虚拟机）。
-不用 igc 的机器可以把 kmod-e1000e 也去掉。
+KEEP 只留 x86 软路由真正会用到的：i225/i226（igc）。
+kmod-e1000 / kmod-e1000e / kmod-virtio-net 全部移除 —— 本项目面向物理软路由，
+用不到虚拟机和千兆老网卡；即使日后需要，也应由用户在 .config 里自行加回。
+
+另外 i915-firmware-dmc 不以 kmod- 开头，早先的"只过滤 kmod-*"逻辑会把它
+原样保留（它是核显固件，属于要清掉的显卡相关包）。这里单独列入 DROP_EXTRA。
 """
 import re
 import sys
 from pathlib import Path
 
 KEEP = {
-    "kmod-igc",        # Intel i225 / i226 2.5G
-    "kmod-e1000",      # QEMU / virtualbox
-    "kmod-e1000e",     # 常见虚拟网卡 / 部分老机器
-    "kmod-virtio-net", # KVM
+    "kmod-igc",        # Intel i225 / i226 2.5G —— 本项目唯一需要保留的网卡驱动
 }
 
-# 从 DEFAULT_PACKAGES 里剔除的包（挂载点功能）
+# 从 DEFAULT_PACKAGES / DEVICE_PACKAGES 里剔除的包（挂载点功能）
 DROP_DEFAULT = {
     "automount",    # 自动挂载 U 盘，DEPENDS:+block-mount
     "block-mount",  # automount 的依赖，一并去掉
 }
+
+# 非 kmod- 前缀、但要一并清掉的包（显卡相关）
+DROP_EXTRA = {
+    "i915-firmware-dmc",  # Intel 核显 DMC 固件；本项目已移除全部显卡驱动，留着纯浪费空间
+}
+
+DROP_ALL = DROP_DEFAULT | DROP_EXTRA
 
 DEFAULT = "openwrt/target/linux/x86/image/64.mk"
 TARGET_MK = "openwrt/target/linux/x86/Makefile"
@@ -61,8 +69,8 @@ def trim_device_packages(path: Path) -> int:
         # 挂载点相关包在 DEVICE_PACKAGES 里也可能显式出现（实测 64.mk 里就有 block-mount），
         # 它们不是 kmod- 前缀，早先只按 kmod- 过滤会把 block-mount 原样留下，
         # 结果"DEFAULT_PACKAGES 删掉了 automount"却仍被 DEVICE_PACKAGES 拉回 block-mount，
-        # 挂载点功能照样进固件。这里必须一并剔除。
-        if name in DROP_DEFAULT:
+        # 挂载点功能照样进固件。i915-firmware-dmc 同理。这里必须一并剔除。
+        if name in DROP_ALL:
             removed.append(name)
             continue
         if name.startswith("kmod-"):
@@ -73,10 +81,16 @@ def trim_device_packages(path: Path) -> int:
         else:
             kept.append(tok)
 
-    # 每行 4 个，用续行符连接；最后一行不带反斜杠
+    # 每行 4 个，用续行符连接；最后一行不带反斜杠。
+    # kept 为空是**正常**的：v25.12.2 实测 64.mk 的 DEVICE_PACKAGES 全是 kmod-*
+    # （kmod-amazon-ena / amd-xgbe / bnx2 / e1000 / dwmac-intel / forcedeth /
+    #   fs-vfat / tg3 / drm-i915），且一个都不在 KEEP 里 —— 也就是"全删光"是正确结果。
+    # 此时把整条赋值行去掉，避免留下 `DEVICE_PACKAGES += \` 这种悬空续行导致 make 报错。
     if not kept:
-        print("!! DEVICE_PACKAGES 被清空，可能解析有误")
-        return 1
+        print(f"==> [驱动] DEVICE_PACKAGES 全部为待剔除驱动，整行移除（移除 {len(removed)} 个：{' '.join(removed)}）")
+        text = text[: m.start()] + text[m.end():]
+        path.write_text(text)
+        return 0
     chunks = [" ".join(kept[i : i + 4]) for i in range(0, len(kept), 4)]
     body_lines = [("\t" + c + " \\") for c in chunks[:-1]] + ["\t" + chunks[-1]]
     new_block = header + "\\\n" + "\n".join(body_lines)
@@ -86,11 +100,11 @@ def trim_device_packages(path: Path) -> int:
     print(f"==> [驱动] 保留 {len(kept)} 项：{' '.join(kept)}")
     print(f"==> [驱动] 移除 {len(removed)} 个：{' '.join(removed) if removed else '(无)'}")
 
-    # 硬性断言：改写后的 DEVICE_PACKAGES 里不允许再出现挂载点相关包。
+    # 硬性断言：改写后的 DEVICE_PACKAGES 里不允许再出现挂载点/显卡相关包。
     # 早先这里只 print 不检查，block-mount 一路混进固件都没人发现。
-    leftover = [t for t in kept if t.lstrip("-") in DROP_DEFAULT]
+    leftover = [t for t in kept if t.lstrip("-") in DROP_ALL]
     if leftover:
-        print(f"!! DEVICE_PACKAGES 里仍残留挂载点包：{' '.join(leftover)}")
+        print(f"!! DEVICE_PACKAGES 里仍残留应剔除的包：{' '.join(leftover)}")
         return 1
 
     # 注意：kmod-igc / kmod-e1000e 在 target Makefile 的 DEFAULT_PACKAGES 里，
@@ -132,11 +146,14 @@ def trim_default_packages(path: Path) -> int:
     flat = re.sub(r"\\[ \t]*\n", " ", body)
     tokens = flat.split()
 
-    removed_kmod, removed_mount, kept = [], [], []
+    removed_kmod, removed_mount, removed_extra, kept = [], [], [], []
     for tok in tokens:
         name = tok.lstrip("-")
         if name in DROP_DEFAULT:
             removed_mount.append(name)
+            continue
+        if name in DROP_EXTRA:
+            removed_extra.append(name)
             continue
         if name.startswith("kmod-"):
             if name in KEEP:
@@ -146,7 +163,7 @@ def trim_default_packages(path: Path) -> int:
             continue
         kept.append(tok)
 
-    if not removed_kmod and not removed_mount:
+    if not removed_kmod and not removed_mount and not removed_extra:
         print("==> [DEFAULT_PACKAGES] 已无需要裁剪的项")
         return 0
     if not kept:
@@ -164,12 +181,14 @@ def trim_default_packages(path: Path) -> int:
         print(f"==> [驱动] 从 DEFAULT_PACKAGES 移除 {len(removed_kmod)} 个：{' '.join(removed_kmod)}")
     if removed_mount:
         print(f"==> [挂载点] 从 DEFAULT_PACKAGES 移除：{' '.join(removed_mount)}")
+    if removed_extra:
+        print(f"==> [显卡] 从 DEFAULT_PACKAGES 移除：{' '.join(removed_extra)}")
     print(f"==> [DEFAULT_PACKAGES] 保留：{' '.join(kept)}")
 
-    # 硬性断言：改写后不允许再有被裁掉的 kmod 或挂载点包
-    leftover = [t for t in kept if t.lstrip("-") in DROP_DEFAULT]
+    # 硬性断言：改写后不允许再有被裁掉的 kmod / 挂载点 / 显卡包
+    leftover = [t for t in kept if t.lstrip("-") in DROP_ALL]
     if leftover:
-        print(f"!! DEFAULT_PACKAGES 里仍残留挂载点包：{' '.join(leftover)}")
+        print(f"!! DEFAULT_PACKAGES 里仍残留应剔除的包：{' '.join(leftover)}")
         return 1
     return 0
 

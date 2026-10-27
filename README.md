@@ -106,6 +106,8 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
     - `CCACHE_COMPILERCHECK=content`：默认按 mtime 判断编译器变没变，apt 重装一次 gcc 就一定 miss。
     另外 **cache key 不能用固定值**：GitHub cache 一旦创建就不可修改，固定 key 会永远命中第一次那份。用 `ccache-<os>-<tag>-<run_id>` + `restore-keys` 前缀匹配取最近的一份。
 22. **`actions/cache` 的 `path` 在 checkout 之前是无意义的相对路径**：`actions/checkout` 默认不保留 `.git` 之外的既有目录，所以 cache 步骤必须排在 checkout **之后**；同时 `path` 用仓库相对路径（`openwrt/.ccache`），到 restore 那一刻 `openwrt/` 还没被 clone，缓存会先落在工作区根下，`feeds.sh` 再把它原地 clone 到同名目录时可能冲突 —— 因此 ccache 目录用 `.ccache` 这种不会与源码冲突的名字，由 `CCACHE_DIR` 显式指向。
+23. **只过滤 `kmod-*` 会漏掉 `i915-firmware-dmc`**：`trim_x86.py` 早先的规则是"名字以 `kmod-` 开头的才判 KEEP / 丢弃，其余原样保留"。但 `i915-firmware-dmc` 是**核显固件**，不以 `kmod-` 开头，于是它一直被当作"非 kmod 项"留下 —— 显卡驱动全删了，固件却还在 `DEFAULT_PACKAGES` 里。现单独建 `DROP_EXTRA` 集合收纳这类包，`DROP_ALL = DROP_DEFAULT | DROP_EXTRA` 同时在 `DEVICE_PACKAGES` 和 `DEFAULT_PACKAGES` 两处生效，并加硬性断言防回流。**排查这类问题的通用手法：不要只按命名前缀判断归属，要按"它属于哪个功能"逐个列白名单。**
+24. **`DEVICE_PACKAGES` 被删空不是错误**：v25.12.2 的 `64.mk` 里 9 项全是待剔除的 kmod，删完 `kept` 为空。早先脚本把空列表当解析失败 `return 1`，会误判。正确做法是**把整条赋值行删掉** —— 若只把列表留空，会剩下 `DEVICE_PACKAGES += \` 这种悬空续行，`make` 解析时把下一行 `GRUB2_VARIANT := generic` 吞进变量，报错位置离真正原因十万八千里。
 
 
 

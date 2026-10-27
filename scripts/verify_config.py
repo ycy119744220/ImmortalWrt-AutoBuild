@@ -30,7 +30,6 @@ MUST_Y = [
     ("Intel i225 / i226 2.5G 网卡", ["PACKAGE_kmod-igc"]),
     ("产物类型", ["TARGET_ROOTFS_EXT4FS", "GRUB_EFI_IMAGES"]),
 ]
-
 # 必须关闭
 MUST_N = [
     # 挂载点（用户明确要求移除）
@@ -45,6 +44,13 @@ MUST_N = [
     # 它不在 luci / luci-light / luci-mod-admin-full 的依赖链上，可以安全关掉；
     # 关掉后 admin/status/overview（order 同为 1）会自然接管首页。
     ("LuCI 主页（Dashboard）", ["PACKAGE_luci-mod-dashboard"]),
+    # 千兆老网卡与虚拟网卡：本项目面向物理软路由（只有 i225/i226），
+    # 这两个驱动在 x86 的 DEVICE_PACKAGES / DEFAULT_PACKAGES 里被强制注入，
+    # 由 trim_x86.py 一并剔除，这里做二次把关。
+    ("Intel 千兆网卡 e1000 / e1000e",
+     ["PACKAGE_kmod-e1000", "PACKAGE_kmod-e1000e"]),
+    # 核显 DMC 固件：不以 kmod- 开头，早期版本漏在 DEFAULT_PACKAGES 里没清掉。
+    ("Intel 核显固件 i915-firmware-dmc", ["PACKAGE_i915-firmware-dmc"]),
     ("性能开关", ["RUBY_ENABLE_YJIT"]),
     ("产物类型", ["TARGET_ROOTFS_SQUASHFS", "GRUB_IMAGES"]),
 ]

@@ -124,6 +124,25 @@ else
 	fail=$((fail + 1))
 fi
 
+echo "==> 千兆网卡 e1000/e1000e 与核显固件必须不存在"
+# 本项目只留 igc（i225/i226），kmod-e1000 / kmod-e1000e / i915-firmware-dmc
+# 都已被 trim_x86.py 从 DEVICE_PACKAGES / DEFAULT_PACKAGES 剔除。
+# 这里按固件里的实际文件反查，防止 Makefile 改动后悄悄回流：
+#   e1000.ko / e1000e.ko                     —— 驱动本体
+#   lib/firmware/e1000*                      —— e1000e 的固件（部分版本会带）
+#   lib/firmware/i915/                       —— 核显 DMC 固件目录
+nic_hit=""
+for pat in '^lib/modules/.*/e1000\.ko$' '^lib/modules/.*/e1000e\.ko$' \
+           '^lib/firmware/e1000' '^lib/firmware/i915/'; do
+	if grep -qE "$pat" "$LIST"; then nic_hit="$nic_hit ${pat}"; fi
+done
+if [ -z "$nic_hit" ]; then
+	echo "    OK      无 e1000/e1000e 驱动、无 i915 核显固件"
+else
+	echo "    FAIL    固件里仍有应剔除的驱动/固件：$nic_hit"
+	fail=$((fail + 1))
+fi
+
 echo "==> rootfs 必须放得进 512MB 分区"
 # 分区大小见 config/x86_64.config 的 CONFIG_TARGET_ROOTFS_PARTSIZE。
 # tar -tvzf 第 3 列是未压缩体积（已加 --numeric-owner 保证列位置稳定），
