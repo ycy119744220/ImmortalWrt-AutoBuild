@@ -42,14 +42,19 @@ env:
   #   runner 每次重新 apt 装 gcc，mtime 一定不同 → 全部 miss。
   #   改成按编译器文件内容哈希，只要 gcc 版本没变就一直命中。
   #
-  # CCACHE_MAXSIZE=2G：缓存上限。太小命中率低，太大挤占 GitHub 10GB 额度。
-  #   实测整机编译的活跃目标文件约 1.2–1.8GB，2G 足够。
+  # CCACHE_MAXSIZE=4G：缓存上限。太小会频繁淘汰（LRU），命中率上不去。
+  #   实测 run 40453553423 首次冷编译后就有 948MB / 29118 次可缓存调用；
+  #   下次命中率升高后目标文件总量会继续增长，2G 太紧，放到 4G 留足余量。
+  #   GitHub 单仓库 cache 总额 10GB，4G 占 40%，可接受。
   # ---------------------------------------------------------------------------
+  # 注意：make 内部 rules.mk 会把 CCACHE_DIR 覆盖成 $(TOPDIR)/.ccache，
+  # 与本处路径相同（TOPDIR 即 openwrt/），所以 actions/cache 的 path 能对上。
+  # 真正决定命中率的是下面这几个不被 rules.mk 覆盖的变量。
   CCACHE_DIR: ${{ github.workspace }}/openwrt/.ccache
   CCACHE_BASEDIR: ${{ github.workspace }}/openwrt
   CCACHE_NOHASHDIR: 'true'
   CCACHE_COMPILERCHECK: 'content'
-  CCACHE_MAXSIZE: '2G'
+  CCACHE_MAXSIZE: '4G'
   CCACHE_CPP2: 'true'
 
 jobs:
