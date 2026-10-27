@@ -160,7 +160,7 @@ jobs:
             files/preconfigured release-out
 
       - name: 收集产物
-        run: ./scripts/collect.sh "${{ steps.ver.outputs.tag }}" release-out
+        run: ./scripts/collect.sh "${{ steps.ver.outputs.tag }}" release-out release-out
 
       - name: 保存 .config 作为 artifact
         uses: actions/upload-artifact@v7

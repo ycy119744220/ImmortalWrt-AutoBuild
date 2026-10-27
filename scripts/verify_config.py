@@ -23,6 +23,11 @@ MUST_Y = [
      ["PACKAGE_dnsmasq-full", "PACKAGE_kmod-tun", "PACKAGE_kmod-inet-diag",
       "PACKAGE_kmod-nft-tproxy", "PACKAGE_ip-full", "PACKAGE_unzip",
       "PACKAGE_ca-bundle", "PACKAGE_ruby"]),
+    # 2.5G 软路由的主流网卡就是 i225/i226，全系都在 igc.ko 里
+    # （i220_v i225_lm/v/i/k/k2/it i226_k/lmv/lm/v/it 等 PCI ID 全在同一张表）。
+    # 这是整份驱动裁剪里唯一必须活下来的 kmod —— KEEP 集合里误删它，
+    # 固件刷进去会直接没有网口。
+    ("Intel i225 / i226 2.5G 网卡", ["PACKAGE_kmod-igc"]),
     ("产物类型", ["TARGET_ROOTFS_EXT4FS", "GRUB_EFI_IMAGES"]),
 ]
 

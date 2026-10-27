@@ -32,7 +32,7 @@
 ## 配置裁剪
 
 - **挂载点**：`luci-app-fstab` / `block-mount` 显式 `=n`。ImmortalWrt 25.12 已把 `block-mount` 并入 `fstools`、LuCI 无 fstab 应用，该菜单天然不存在，`=n` 只是防上游回退。
-- **网卡驱动**：只留 `kmod-igc`（Intel i225/i226）与 `kmod-e1000` / `kmod-e1000e` / `kmod-virtio-net`。真正的剔除在 `scripts/trim_x86.py`，因为 x86 的 `64.mk` 会用 `DEVICE_PACKAGES` 强制注入驱动，`.config` 清不干净。
+- **网卡驱动**：只留 `kmod-igc`（Intel i220/i225/i226 全系 2.5G，**i225 与 i226 是同一个驱动**）与 `kmod-e1000` / `kmod-e1000e` / `kmod-virtio-net`。**显卡驱动全部移除**。真正的剔除在 `scripts/trim_x86.py`，因为 x86 的 `64.mk` 会用 `DEVICE_PACKAGES` 强制注入驱动，`.config` 清不干净。完整对照表见 [`docs/drivers.md`](docs/drivers.md)。
 
 ## 预配置版包含什么
 
@@ -96,6 +96,11 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
     > 推论：**凡是会联网/带引号的构建逻辑，都不要写在 Makefile 的 recipe 里**。Makefile 只负责声明，逻辑交给脚本。
 18. **Argon 3.0.0 把 CSS 挪了位置**：2.x 是 `www/luci-static/argon/cascade.css`，3.0.0 起（`immortalwrt/luci` commit `ebc4118`，2026-10-21）改成 `www/luci-static/argon/css/cascade.css`。自检脚本写死旧路径，于是**主题明明编进固件了却报"缺 CSS"**（实测 CI run 40413422355，编译本身 72 分钟全绿，卡在自检）。现改为两个路径任一命中即算通过，并额外断言 `etc/uci-defaults/30_luci-theme-argon` 存在（证明默认主题真的被设成 argon）。
 19. **别用 `grep 'rwxr-xr-x'` 判权限**：`tar -tv` 打出来的是 `-rwxr-xr-x`，**前面带文件类型字符 `-`**，写死 `rwxr-xr-x` 会命中（因为是子串），但只要有人加了 `^` 锚点就全挂；反过来用 `grep -q 'rwxr-xr-x'` 又会被 `-rwxr-xr-x` 和 `drwxr-xr-x` 同时命中。正确做法是取 `awk 'NR==1{print $1}'` 出来做**精确** `case` 匹配，并把「644 也算可接受」写进白名单 —— `/etc/uci-defaults` 下的脚本被归一化成 644 时 rc 照样会 fork 执行，判 755 会误杀。
+20. **`collect.sh` 找错目录 + 先删后找，双杀**（run 40423268809，编译 56 分钟全绿却卡在"收集产物"）：
+    - **找错目录**：`make_preconfigured.sh` 产出在 `release-out/`，`collect.sh` 却去 `openwrt/bin/targets/x86/64/` 找 `*-preconfigured.img.gz`。日志里预配置镜像明明已生成并 `gzip -t` 通过，收集阶段却报"未产出"。
+    - **先删后找**：`rm -f "$OUT"/*.img.gz` 在查找之前执行，而输出目录和预配置暂存目录是**同一个** `release-out` —— 就算路径改对了，也会先把待收集的文件删掉再报缺失。
+    修法：预配置版在两个位置都找（`$PRESTAGE` 优先，`$BIN` 兜底）；清理只删**不带 `preconfigured`** 的 `.img.gz`；拷贝顺序改成"先拿预配置版，再写普通版"，并用 `$PREOUT != $pre` 跳过同文件自拷贝（否则 `cp: are the same file` 会让 `set -e` 直接退出）。三种场景已本地回归：原地、历史路径、真缺失（真缺失时打印两个查找路径 + 目录内容后 `exit 1`）。
+
 
 
 实测数值（2026-10）：内核下载 22MB → 解压 62MB；Country.mmdb 7.6MB、GeoSite.dat 4.3MB、GeoIP.dat 16.5MB、ASN.mmdb 9.0MB。下载走 `github.com` 直连，失败自动切 `gh-proxy.com` 加速再回退直连（三通道重试）。
@@ -104,7 +109,7 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
 
 任一失败都会让 job 变红、不发 Release：
 
-1. `verify_config.py`：Argon 主题 + 设置工具 / 中文 / UPnP / OpenClash 三件套 / 依赖必须 `=y`；`luci-app-fstab`、`block-mount`、`automount`、`RUBY_ENABLE_YJIT` 必须关闭。`DEFAULT_block-mount` / `DEFAULT_automount` 只打 `NOTE` 不计失败（它们是 `select` 强制项，`.config` 里改不动，实际靠 `trim_x86.py` 改 target Makefile）。**符号不存在只告警不失败**（kconfig 对未被引用的符号不写任何行）。
+1. `verify_config.py`：Argon 主题 + 设置工具 / 中文 / UPnP / OpenClash 三件套 / 依赖 / **`kmod-igc`(i225+i226)** 必须 `=y`；`luci-app-fstab`、`block-mount`、`automount`、`RUBY_ENABLE_YJIT` 必须关闭。`DEFAULT_block-mount` / `DEFAULT_automount` 只打 `NOTE` 不计失败（它们是 `select` 强制项，`.config` 里改不动，实际靠 `trim_x86.py` 改 target Makefile）。**符号不存在只告警不失败**（kconfig 对未被引用的符号不写任何行）。
 2. `verify_firmware.sh`：rootfs 里必须真有 Argon 资源、中文语言包、`clash_meta`（>20MB）、四个库（体积下限）、首启脚本 755；普通版不得含预配置脚本。
 3. `make_preconfigured.sh`：注入后必须能在镜像里定位 rootfs 分区（靠 `/etc/openwrt_release` 而非 `/dev/ 第一个 ext4`）、`90-preconfigured` 权限 755，gzip 完整性通过。
 4. `make` 全程 `set -o pipefail`，失败即红并上传 `build.log`。
