@@ -30,6 +30,27 @@ env:
   # 关掉遥测/交互式提示，保证 make 全自动
   DEBIAN_FRONTEND: noninteractive
   FORCE_UNSAFE_CONFIGURE: '1'
+  # ---------------------------------------------------------------------------
+  # ccache 环境变量（配合下面 actions/cache 的 openwrt/.ccache）
+  #
+  # CCACHE_BASEDIR + CCACHE_NOHASHDIR 是命中率的命门：
+  #   runner 上源码路径每次都变（/home/runner/work/...），而 ccache 默认会把
+  #   **绝对路径**写进哈希。不设 BASEDIR 的话，换一次工作目录就全部 miss。
+  #   BASEDIR 会把路径改写成相对路径，NOHASHDIR 再把所在目录本身从哈希里去掉。
+  #
+  # CCACHE_COMPILERCHECK=content：默认按 mtime 判断编译器是否变化，
+  #   runner 每次重新 apt 装 gcc，mtime 一定不同 → 全部 miss。
+  #   改成按编译器文件内容哈希，只要 gcc 版本没变就一直命中。
+  #
+  # CCACHE_MAXSIZE=2G：缓存上限。太小命中率低，太大挤占 GitHub 10GB 额度。
+  #   实测整机编译的活跃目标文件约 1.2–1.8GB，2G 足够。
+  # ---------------------------------------------------------------------------
+  CCACHE_DIR: ${{ github.workspace }}/openwrt/.ccache
+  CCACHE_BASEDIR: ${{ github.workspace }}/openwrt
+  CCACHE_NOHASHDIR: 'true'
+  CCACHE_COMPILERCHECK: 'content'
+  CCACHE_MAXSIZE: '2G'
+  CCACHE_CPP2: 'true'
 
 jobs:
   build:
@@ -55,6 +76,29 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "==> 目标版本: $TAG"
 
+      # ---------------------------------------------------------------------
+      # ccache：整机编译 61 分钟里有 54 分钟在 make，这是唯一能大幅压缩的地方。
+      # 配置里早就有 CONFIG_CCACHE=y，但一直没给 .ccache 做持久化，
+      # 每次 runner 全新，等于一直冷启动。
+      #
+      # key 的选择（吃过教训，务必保留注释）：
+      #   - 主键带上 tag：上游换版本时 patch 级改动会变，旧缓存命中率极低，
+      #     带上 tag 可以自然失效，避免"拿旧目标文件编出不一致的固件"。
+      #   - 后缀用 run_id：每次运行都写一份新的，restore-keys 前缀匹配取最近的旧缓存。
+      #     GitHub cache 一旦创建就不可改，用固定 key 会导致永远命中第一次那份。
+      #   - key 里**不放** .config 哈希：配置改一次就整体失效太浪费，
+      #     改配置最多是部分未命中（ccache 自己按源文件+参数判命中）。
+      # ---------------------------------------------------------------------
+      - name: 恢复 ccache
+        id: ccache
+        uses: actions/cache@v4
+        with:
+          path: openwrt/.ccache
+          key: ccache-${{ runner.os }}-${{ steps.ver.outputs.tag }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ steps.ver.outputs.tag }}-
+            ccache-${{ runner.os }}-
+
       - name: 安装编译依赖
         run: |
           set -euo pipefail
@@ -67,6 +111,9 @@ jobs:
             gettext git libncurses-dev libssl-dev rsync unzip \
             zlib1g-dev file wget curl pigz subversion device-tree-compiler \
             python3-setuptools libelf-dev
+          # ccache 二进制本身：Ubuntu 镜像通常预装，没装就补一个（几百 KB）
+          command -v ccache >/dev/null 2>&1 || sudo apt-get -y install ccache
+          ccache --version | head -1
 
       - name: 拉源码与官方 feeds
         run: |
@@ -126,15 +173,31 @@ jobs:
         run: |
           set -euo pipefail
           cd openwrt
+          # 缓存恢复后在日志里确认 BASEDIR/COMPILERCHECK 真的生效了，
+          # 这三个值不对，命中率会直接掉到接近 0（且没有任何报错提示）。
+          echo "==> ccache 环境"
+          echo "    CCACHE_DIR          = ${CCACHE_DIR:-<未设置>}"
+          echo "    CCACHE_BASEDIR      = ${CCACHE_BASEDIR:-<未设置>}"
+          echo "    CCACHE_COMPILERCHECK= ${CCACHE_COMPILERCHECK:-<未设置>}"
+          echo "    CCACHE_MAXSIZE      = ${CCACHE_MAXSIZE:-<未设置>}"
+          ccache --max-size="$CCACHE_MAXSIZE" 2>/dev/null || true
+          echo "==> 编译前 ccache 统计"
+          ccache -s 2>/dev/null || true
+
           # 日志写文件再回放，不用 `| tee`：
           # 整机编译 V=s 的日志能到数 GB，tee 会让每行同时走「写文件 + 写 stdout」，
           # Actions 端还要再落一次盘，IO 打满后编译会莫名变慢甚至假死。
           # 这里成功后不打印（避免 GB 级 step 日志），失败才回放尾部。
+          start=$(date +%s)
           set +e
           make -j"$(nproc)" V=s >../build.log 2>&1
           rc=$?
           set -e
-          echo "==> make 退出码 $rc，日志 $(wc -l <../build.log) 行 / $(du -h ../build.log | cut -f1)"
+          echo "==> make 退出码 $rc，耗时 $(( $(date +%s) - start )) 秒，日志 $(wc -l <../build.log) 行 / $(du -h ../build.log | cut -f1)"
+
+          echo "==> 编译后 ccache 统计（命中率直接决定下一次快多少）"
+          ccache -s 2>/dev/null || true
+
           if [ "$rc" -ne 0 ]; then
             echo "!! 编译失败，尾部 300 行："
             tail -300 ../build.log

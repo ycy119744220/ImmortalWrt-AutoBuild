@@ -100,6 +100,12 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
     - **找错目录**：`make_preconfigured.sh` 产出在 `release-out/`，`collect.sh` 却去 `openwrt/bin/targets/x86/64/` 找 `*-preconfigured.img.gz`。日志里预配置镜像明明已生成并 `gzip -t` 通过，收集阶段却报"未产出"。
     - **先删后找**：`rm -f "$OUT"/*.img.gz` 在查找之前执行，而输出目录和预配置暂存目录是**同一个** `release-out` —— 就算路径改对了，也会先把待收集的文件删掉再报缺失。
     修法：预配置版在两个位置都找（`$PRESTAGE` 优先，`$BIN` 兜底）；清理只删**不带 `preconfigured`** 的 `.img.gz`；拷贝顺序改成"先拿预配置版，再写普通版"，并用 `$PREOUT != $pre` 跳过同文件自拷贝（否则 `cp: are the same file` 会让 `set -e` 直接退出）。三种场景已本地回归：原地、历史路径、真缺失（真缺失时打印两个查找路径 + 目录内容后 `exit 1`）。
+21. **ccache 开了但没生效，等于没开**：配置里 `CONFIG_CCACHE=y` 一直存在，但没有任何步骤把 `openwrt/.ccache` 持久化，runner 每次全新 → 一直是冷启动 → 54 分钟的 `make` 完全没被优化。接了 `actions/cache` 之后，还差三个环境变量，缺一个命中率就趋近 0 **且不报任何错**：
+    - `CCACHE_BASEDIR`：不设的话绝对路径（`/home/runner/work/...`）会进哈希，runner 每次目录都变 → 全 miss。
+    - `CCACHE_NOHASHDIR=true`：把"目录本身"从哈希里去掉。
+    - `CCACHE_COMPILERCHECK=content`：默认按 mtime 判断编译器变没变，apt 重装一次 gcc 就一定 miss。
+    另外 **cache key 不能用固定值**：GitHub cache 一旦创建就不可修改，固定 key 会永远命中第一次那份。用 `ccache-<os>-<tag>-<run_id>` + `restore-keys` 前缀匹配取最近的一份。
+22. **`actions/cache` 的 `path` 在 checkout 之前是无意义的相对路径**：`actions/checkout` 默认不保留 `.git` 之外的既有目录，所以 cache 步骤必须排在 checkout **之后**；同时 `path` 用仓库相对路径（`openwrt/.ccache`），到 restore 那一刻 `openwrt/` 还没被 clone，缓存会先落在工作区根下，`feeds.sh` 再把它原地 clone 到同名目录时可能冲突 —— 因此 ccache 目录用 `.ccache` 这种不会与源码冲突的名字，由 `CCACHE_DIR` 显式指向。
 
 
 

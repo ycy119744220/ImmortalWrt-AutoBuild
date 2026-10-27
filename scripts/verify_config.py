@@ -41,6 +41,10 @@ MUST_N = [
     # 单独在下面的 REPORT_ONLY 里提示。
     ("挂载点（Mount Points）",
      ["PACKAGE_luci-app-fstab", "PACKAGE_block-mount", "PACKAGE_automount"]),
+    # LuCI 的「主页 / Dashboard」按用户要求删除。
+    # 它不在 luci / luci-light / luci-mod-admin-full 的依赖链上，可以安全关掉；
+    # 关掉后 admin/status/overview（order 同为 1）会自然接管首页。
+    ("LuCI 主页（Dashboard）", ["PACKAGE_luci-mod-dashboard"]),
     ("性能开关", ["RUBY_ENABLE_YJIT"]),
     ("产物类型", ["TARGET_ROOTFS_SQUASHFS", "GRUB_IMAGES"]),
 ]

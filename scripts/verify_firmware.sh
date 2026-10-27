@@ -104,6 +104,46 @@ else
 	echo "    OK      无 luci-app-fstab"
 fi
 
+echo "==> LuCI 主页（Dashboard）必须不存在"
+# 用户要求删掉「主页」。luci-mod-dashboard 会往这几处写文件，
+# 任何一个残留都说明包又被打进来了：
+#   usr/share/luci/menu.d/luci-mod-dashboard.json   —— 注册 admin/dashboard 菜单项
+#   www/luci-static/resources/view/dashboard/       —— 页面视图
+#   etc/config/dashboard                            —— 它的 uci 配置
+dash_hit=""
+for p in usr/share/luci/menu.d/luci-mod-dashboard.json etc/config/dashboard; do
+	if grep -F -x -q "$p" "$LIST"; then dash_hit="$dash_hit $p"; fi
+done
+if grep -q '^www/luci-static/resources/view/dashboard/' "$LIST"; then
+	dash_hit="$dash_hit www/luci-static/resources/view/dashboard/"
+fi
+if [ -z "$dash_hit" ]; then
+	echo "    OK      无 luci-mod-dashboard（首页由 状态→概览 接管）"
+else
+	echo "    FAIL    固件里仍有 luci-mod-dashboard：$dash_hit"
+	fail=$((fail + 1))
+fi
+
+echo "==> rootfs 必须放得进 512MB 分区"
+# 分区大小见 config/x86_64.config 的 CONFIG_TARGET_ROOTFS_PARTSIZE。
+# tar -tvzf 第 3 列是未压缩体积（已加 --numeric-owner 保证列位置稳定），
+# 只累加普通文件（权限串以 - 开头），目录/链接不计。
+used=$(tar -tvzf "$ROOTFS" --numeric-owner 2>/dev/null \
+	| awk '$1 ~ /^-/ { s += $3 } END { print s + 0 }')
+limit=$((450 * 1024 * 1024)) # 512MB 分区扣掉 ext4 元数据/日志后的安全线
+printf '    实际占用 %s MB / 上限 %s MB（分区 512MB）\n' \
+	"$((used / 1024 / 1024))" "$((limit / 1024 / 1024))"
+if [ "$used" -gt "$limit" ]; then
+	echo "    FAIL    rootfs 内容超过安全线，刷机会写不下"
+	echo "    占用前 20 名："
+	tar -tvzf "$ROOTFS" --numeric-owner 2>/dev/null \
+		| awk '$1 ~ /^-/ { printf "%12d  %s\n", $3, $NF }' \
+		| sort -rn | head -20 | sed 's/^/      /'
+	fail=$((fail + 1))
+else
+	echo "    OK      余量 $(( (limit - used) / 1024 / 1024 )) MB"
+fi
+
 echo "==> 首启脚本"
 # files/common 里的脚本在仓库里就是 100755；但 /etc/uci-defaults 下的脚本
 # 真正被 rc 执行的时候，**必须**是 0755，否则静默不跑。这里只认两种可接受状态：
