@@ -108,6 +108,24 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
 22. **`actions/cache` 的 `path` 在 checkout 之前是无意义的相对路径**：`actions/checkout` 默认不保留 `.git` 之外的既有目录，所以 cache 步骤必须排在 checkout **之后**；同时 `path` 用仓库相对路径（`openwrt/.ccache`），到 restore 那一刻 `openwrt/` 还没被 clone，缓存会先落在工作区根下，`feeds.sh` 再把它原地 clone 到同名目录时可能冲突 —— 因此 ccache 目录用 `.ccache` 这种不会与源码冲突的名字，由 `CCACHE_DIR` 显式指向。
 23. **只过滤 `kmod-*` 会漏掉 `i915-firmware-dmc`**：`trim_x86.py` 早先的规则是"名字以 `kmod-` 开头的才判 KEEP / 丢弃，其余原样保留"。但 `i915-firmware-dmc` 是**核显固件**，不以 `kmod-` 开头，于是它一直被当作"非 kmod 项"留下 —— 显卡驱动全删了，固件却还在 `DEFAULT_PACKAGES` 里。现单独建 `DROP_EXTRA` 集合收纳这类包，`DROP_ALL = DROP_DEFAULT | DROP_EXTRA` 同时在 `DEVICE_PACKAGES` 和 `DEFAULT_PACKAGES` 两处生效，并加硬性断言防回流。**排查这类问题的通用手法：不要只按命名前缀判断归属，要按"它属于哪个功能"逐个列白名单。**
 24. **`DEVICE_PACKAGES` 被删空不是错误**：v25.12.2 的 `64.mk` 里 9 项全是待剔除的 kmod，删完 `kept` 为空。早先脚本把空列表当解析失败 `return 1`，会误判。正确做法是**把整条赋值行删掉** —— 若只把列表留空，会剩下 `DEVICE_PACKAGES += \` 这种悬空续行，`make` 解析时把下一行 `GRUB2_VARIANT := generic` 吞进变量，报错位置离真正原因十万八千里。
+25. **`CONFIG_CCACHE=y` 会被 defconfig 静默丢弃，ccache 全程不参与编译**（本轮最隐蔽的一个）。`config/Config-devel.in` 里写的是：
+    ```kconfig
+    menuconfig DEVEL
+    	bool "Advanced configuration options (for developers)"
+
+    	config CCACHE
+    		bool "Use ccache" if DEVEL
+    ```
+    `CCACHE` 的**可见性**挂在 `DEVEL` 上。`DEVEL` 默认 `n`，此时 kconfig 认为该符号不可见，defconfig 会把 `CONFIG_CCACHE=y` **整行删掉**，不报任何错。于是 `rules.mk` 的 `ifneq ($(CONFIG_CCACHE),)` 不成立，`TARGET_CC := ccache $(TARGET_CC)` 那几行压根不执行。
+    实测 run `40445331733`：编译 4051 秒，`ccache -s` 前后都是 `0.0 GB / 2.0 GB`。**排查手法**：别只看 workflow 里的 `export CCACHE_*`，要下载 run 的 `config-<tag>` artifact，`grep ccache .config` —— 如果连 `CONFIG_CCACHE` 这个键都不存在（只剩 `CONFIG_CCACHE_DIR=""`），就是被 defconfig 丢了。
+    修法：`.config` 里同时写 `CONFIG_DEVEL=y` + `CONFIG_CCACHE=y`。`DEVEL` 只是菜单开关，子项默认全关（`if DEVEL` 全部是可见性条件，不是构建逻辑），开它不影响产物。已加入 `MUST_Y_STRICT` 断言硬失败。
+    > 推论：**任何"打开了却没生效"的编译期开关，都要去最终 `.config` 里确认键还存在**，而不是看源配置里写过什么。
+26. **`rules.mk` 会覆盖你 export 的 `CCACHE_DIR`**：`rules.mk` 里是
+    ```make
+    export CCACHE_DIR := $(if $(call qstrip,$(CONFIG_CCACHE_DIR)),$(call qstrip,$(CONFIG_CCACHE_DIR)),$(TOPDIR)/.ccache)
+    ```
+    无条件赋值，shell 里 export 的值进到 `make` 内部就被顶掉。所以 `build.yml` 里那个 `CCACHE_DIR` 环境变量对 make 无效，真正生效的是 `CONFIG_CCACHE_DIR`。留空即可 —— 会回落到 `$(TOPDIR)/.ccache`，而 `TOPDIR` 就是 `openwrt/`，与 `actions/cache` 的 `path: openwrt/.ccache` 正好对上。
+    **别写 `CONFIG_CCACHE_DIR="$(TOPDIR)/.ccache"`**：Kconfig 的 string 项不做 `$(TOPDIR)` 变量展开，那会变成一个名为 `$(TOPDIR)/.ccache` 的字面量目录。
 
 
 

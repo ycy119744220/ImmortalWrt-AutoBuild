@@ -30,6 +30,22 @@ MUST_Y = [
     ("Intel i225 / i226 2.5G 网卡", ["PACKAGE_kmod-igc"]),
     ("产物类型", ["TARGET_ROOTFS_EXT4FS", "GRUB_EFI_IMAGES"]),
 ]
+
+# 与 MUST_Y 相同语义，但**符号缺失也算失败**。
+# 为什么单独列：MUST_Y 里 `符号不存在` 只 WARN，因为上游改名/合并很常见，
+# 硬失败会频繁误报。但下面这一项不同 —— 它缺失时不会产生任何错误信息，
+# 只会让每次编译静默地慢一倍，属于"沉默的故障"，必须硬失败。
+MUST_Y_STRICT = [
+    # CCACHE 的可见性挂在 DEVEL 上（config/Config-devel.in：
+    #   menuconfig DEVEL
+    #   config CCACHE
+    #       bool "Use ccache" if DEVEL
+    # ）。DEVEL=n 时 kconfig 认为 CCACHE 不可见，defconfig 会把
+    # `CONFIG_CCACHE=y` 整行删掉，于是 rules.mk 的
+    # `ifneq ($(CONFIG_CCACHE),)` 不成立，ccache 全程不参与编译。
+    # 实际案例：run 40445331733 编译 4051 秒，ccache 前后都是 0.0GB。
+    ("ccache 加速（DEVEL 缺失会导致 CCACHE 被静默丢弃）", ["DEVEL", "CCACHE"]),
+]
 # 必须关闭
 MUST_N = [
     # 挂载点（用户明确要求移除）
@@ -102,6 +118,19 @@ def main():
             elif v is None:
                 print(f"    WARN    {s} 符号不存在（上游可能改名/合并/删除）")
                 warn += 1
+            else:
+                print(f"    FAIL    {s}={v}（应为 y）")
+                fail += 1
+
+    for title, syms in MUST_Y_STRICT:
+        print(f"==> {title}")
+        for s in syms:
+            v = values.get(s)
+            if v == "y":
+                print(f"    OK      {s}=y")
+            elif v is None:
+                print(f"    FAIL    {s} 符号不存在（会被 defconfig 静默丢弃，必须显式 =y）")
+                fail += 1
             else:
                 print(f"    FAIL    {s}={v}（应为 y）")
                 fail += 1

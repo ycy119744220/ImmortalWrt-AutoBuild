@@ -175,14 +175,32 @@ jobs:
           cd openwrt
           # 缓存恢复后在日志里确认 BASEDIR/COMPILERCHECK 真的生效了，
           # 这三个值不对，命中率会直接掉到接近 0（且没有任何报错提示）。
-          echo "==> ccache 环境"
+          # 注意：CCACHE_DIR / CCACHE_BASEDIR 在 make 内部会被 rules.mk 重新赋值
+          # （CCACHE_BASEDIR := $(TOPDIR)，CCACHE_DIR := $(TOPDIR)/.ccache），
+          # 这里的 echo 打印的是 make 之外的 shell 值，仅作参考。
+          echo "==> ccache 环境（shell 侧）"
           echo "    CCACHE_DIR          = ${CCACHE_DIR:-<未设置>}"
           echo "    CCACHE_BASEDIR      = ${CCACHE_BASEDIR:-<未设置>}"
           echo "    CCACHE_COMPILERCHECK= ${CCACHE_COMPILERCHECK:-<未设置>}"
           echo "    CCACHE_MAXSIZE      = ${CCACHE_MAXSIZE:-<未设置>}"
           ccache --max-size="$CCACHE_MAXSIZE" 2>/dev/null || true
+
+          # 硬性断言：ccache 必须真的接上。
+          # 背景：config/Config-devel.in 里 `config CCACHE` 带 `if DEVEL`，
+          # DEVEL=n 时该符号不可见，defconfig 会把 CONFIG_CCACHE=y 静默删掉，
+          # make 里的 `ifneq ($(CONFIG_CCACHE),)` 不成立 → ccache 全程不参与。
+          # 实测 run 40445331733：编译 4051 秒，ccache 前后均 0.0GB。
+          echo "==> ccache 接线检查"
+          if ! grep -qx 'CONFIG_CCACHE=y' .config; then
+            echo "!! .config 里没有 CONFIG_CCACHE=y —— ccache 不会生效，直接失败"
+            grep -iE '^#? ?CONFIG_(CCACHE|DEVEL)' .config || echo "   (一行都没有，说明被 defconfig 丢弃)"
+            exit 1
+          fi
+          echo "    OK  CONFIG_CCACHE=y"
+          echo "    .ccache 实际路径将由 rules.mk 决定（CCACHE_DIR 环境变量会被其覆盖）"
           echo "==> 编译前 ccache 统计"
-          ccache -s 2>/dev/null || true
+          ccache -s -v 2>&1 | head -30 || true
+          du -sh "$CCACHE_DIR" 2>/dev/null || echo "    (.ccache 目录不存在)"
 
           # 日志写文件再回放，不用 `| tee`：
           # 整机编译 V=s 的日志能到数 GB，tee 会让每行同时走「写文件 + 写 stdout」，
@@ -196,7 +214,8 @@ jobs:
           echo "==> make 退出码 $rc，耗时 $(( $(date +%s) - start )) 秒，日志 $(wc -l <../build.log) 行 / $(du -h ../build.log | cut -f1)"
 
           echo "==> 编译后 ccache 统计（命中率直接决定下一次快多少）"
-          ccache -s 2>/dev/null || true
+          ccache -s -v 2>&1 | head -30 || true
+          du -sh "$CCACHE_DIR" 2>/dev/null || echo "    (.ccache 目录不存在)"
 
           if [ "$rc" -ne 0 ]; then
             echo "!! 编译失败，尾部 300 行："
