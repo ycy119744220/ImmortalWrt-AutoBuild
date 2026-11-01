@@ -30,6 +30,9 @@ add_host 'IQOO_12'  'IQOO-12'  '1C:7A:43:75:39:69' '192.168.88.89'
 add_host 'AX6000'   'AX6000'   '3C:CD:57:F2:B0:14' '192.168.88.2'
 add_host 'AX6000_2' 'AX6000-2' '3C:CD:57:F3:87:0C' '192.168.88.3'
 
+# add_redirect <名称> <外部端口> <内部IP> [<协议>] [<内部端口>]
+#   proto 不再写死：图片里 Synology_VPN 是 UDP，原先固定 tcp 的写法满足不了。
+#   dest_port 缺省与 src_dport 相同（大多数场景内外端口一致）。
 add_redirect() {
 	uci -q delete "firewall.$1"
 	uci set "firewall.$1=redirect"
@@ -37,17 +40,17 @@ add_redirect() {
 	uci set "firewall.$1.target=DNAT"
 	uci set "firewall.$1.src=wan"
 	uci set "firewall.$1.dest=lan"
-	uci set "firewall.$1.proto=tcp"
+	uci set "firewall.$1.proto=${4:-tcp}"
 	uci set "firewall.$1.src_dport=$2"
 	uci set "firewall.$1.dest_ip=$3"
-	uci set "firewall.$1.dest_port=$2"
+	uci set "firewall.$1.dest_port=${5:-$2}"
 	uci set "firewall.$1.family=ipv4"
 }
-add_redirect 'Docker_Bitwarden' '8890' '192.168.88.254'
-add_redirect 'Synology_Portal'  '8888' '192.168.88.254'
-add_redirect 'Synology_Drive'   '6690' '192.168.88.254'
-add_redirect 'Synology_Photo'   '443'  '192.168.88.254'
-add_redirect 'Synology_VPN'     '9999' '192.168.88.254'
+# 端口转发只保留 Synology_VPN 一条，其余 5 条（Docker_Bitwarden 8890 /
+# Synology_Portal 8888-tcp / Synology_Drive 6690 / Synology_Photo 443 /
+# Synology_VPN 9999）已按要求全部删除。
+# 与图片一致：仅 IPv4、UDP、外部端口 8888 → 192.168.88.254:8888。
+add_redirect 'Synology_VPN' '8888' '192.168.88.254' 'udp' '8888'
 
 uci set upnpd.config.enabled='1'
 uci set upnpd.config.enable_upnp='1'
