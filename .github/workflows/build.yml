@@ -202,7 +202,16 @@ jobs:
             exit 1
           fi
           echo "    OK  CONFIG_CCACHE=y"
-          echo "    .ccache 实际路径将由 rules.mk 决定（CCACHE_DIR 环境变量会被其覆盖）"
+          # 缓存目录必须有内容，否则就是"恢复了但被删掉"的前科。
+          # 首次构建为空属正常，所以只告警不失败；但只要出现过缓存，
+          # 这里就应该是几百 MB 量级。
+          cache_mb=$(du -sm "$CCACHE_DIR" 2>/dev/null | cut -f1)
+          cache_mb=${cache_mb:-0}
+          if [ "$cache_mb" -lt 10 ]; then
+            echo "    WARN .ccache 仅 ${cache_mb}MB —— 缓存未恢复或首次构建（会退化为冷编译）"
+          else
+            echo "    OK  .ccache 已恢复 ${cache_mb}MB"
+          fi
           echo "==> 编译前 ccache 统计"
           ccache -s -v 2>&1 | head -30 || true
           du -sh "$CCACHE_DIR" 2>/dev/null || echo "    (.ccache 目录不存在)"

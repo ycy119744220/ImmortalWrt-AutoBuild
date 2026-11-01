@@ -105,7 +105,7 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
     - `CCACHE_NOHASHDIR=true`：把"目录本身"从哈希里去掉。
     - `CCACHE_COMPILERCHECK=content`：默认按 mtime 判断编译器变没变，apt 重装一次 gcc 就一定 miss。
     另外 **cache key 不能用固定值**：GitHub cache 一旦创建就不可修改，固定 key 会永远命中第一次那份。用 `ccache-<os>-<tag>-<run_id>` + `restore-keys` 前缀匹配取最近的一份。
-22. **`actions/cache` 的 `path` 在 checkout 之前是无意义的相对路径**：`actions/checkout` 默认不保留 `.git` 之外的既有目录，所以 cache 步骤必须排在 checkout **之后**；同时 `path` 用仓库相对路径（`openwrt/.ccache`），到 restore 那一刻 `openwrt/` 还没被 clone，缓存会先落在工作区根下，`feeds.sh` 再把它原地 clone 到同名目录时可能冲突 —— 因此 ccache 目录用 `.ccache` 这种不会与源码冲突的名字，由 `CCACHE_DIR` 显式指向。
+22. **`actions/cache` 的 `path` 必须是 checkout 之后的真实相对路径**：`actions/checkout` 默认不保留 `.git` 之外的既有目录，所以 cache 步骤必须排在 checkout **之后**。`path: openwrt/.ccache` 在 restore 那一刻 `openwrt/` 尚未 clone，actions/cache 会自己创建该目录并解压进去 —— 这一点本身没问题，**但它埋下了第 27 条那个坑**。
 23. **只过滤 `kmod-*` 会漏掉 `i915-firmware-dmc`**：`trim_x86.py` 早先的规则是"名字以 `kmod-` 开头的才判 KEEP / 丢弃，其余原样保留"。但 `i915-firmware-dmc` 是**核显固件**，不以 `kmod-` 开头，于是它一直被当作"非 kmod 项"留下 —— 显卡驱动全删了，固件却还在 `DEFAULT_PACKAGES` 里。现单独建 `DROP_EXTRA` 集合收纳这类包，`DROP_ALL = DROP_DEFAULT | DROP_EXTRA` 同时在 `DEVICE_PACKAGES` 和 `DEFAULT_PACKAGES` 两处生效，并加硬性断言防回流。**排查这类问题的通用手法：不要只按命名前缀判断归属，要按"它属于哪个功能"逐个列白名单。**
 24. **`DEVICE_PACKAGES` 被删空不是错误**：v25.12.2 的 `64.mk` 里 9 项全是待剔除的 kmod，删完 `kept` 为空。早先脚本把空列表当解析失败 `return 1`，会误判。正确做法是**把整条赋值行删掉** —— 若只把列表留空，会剩下 `DEVICE_PACKAGES += \` 这种悬空续行，`make` 解析时把下一行 `GRUB2_VARIANT := generic` 吞进变量，报错位置离真正原因十万八千里。
 25. **`CONFIG_CCACHE=y` 会被 defconfig 静默丢弃，ccache 全程不参与编译**（本轮最隐蔽的一个）。`config/Config-devel.in` 里写的是：
@@ -126,6 +126,28 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
     ```
     无条件赋值，shell 里 export 的值进到 `make` 内部就被顶掉。所以 `build.yml` 里那个 `CCACHE_DIR` 环境变量对 make 无效，真正生效的是 `CONFIG_CCACHE_DIR`。留空即可 —— 会回落到 `$(TOPDIR)/.ccache`，而 `TOPDIR` 就是 `openwrt/`，与 `actions/cache` 的 `path: openwrt/.ccache` 正好对上。
     **别写 `CONFIG_CCACHE_DIR="$(TOPDIR)/.ccache"`**：Kconfig 的 string 项不做 `$(TOPDIR)` 变量展开，那会变成一个名为 `$(TOPDIR)/.ccache` 的字面量目录。
+27. **`feeds.sh` 的 `rm -rf openwrt` 把刚恢复的 ccache 缓存整个删掉**（迄今最会骗人的一个）。完整链路：
+    1. `actions/cache` 恢复 `openwrt/.ccache`，日志打印 `Cache restored successfully` + `Cache restored from key: ccache-Linux-...`
+    2. `feeds.sh` 第 11 行执行 `rm -rf openwrt` —— 缓存就在这个目录里，连锅端
+    3. `git clone` 出干净的 `openwrt/`
+    4. 编译时 `ccache -s` 显示 `Cache size (GB): 0.0`，**但没有任何一行报错**
+
+    实测数据（run `40453553423` → `40462172910`）：前者编译结束存了 948MB 缓存，后者恢复日志正常，编译前却是 `0.0 GB`；命中率只有 11%（全部来自**同一轮编译内部**重复编译同一文件，跨运行命中为 0）；总耗时反而从 4051 秒涨到 4757 秒 —— 纯写入开销、零收益。
+
+    **修法**：`rm -rf` 之前把 `.ccache` 挪到工作区根（同一文件系统，rename 级开销，948MB 也是毫秒级），clone 完再归位：
+    ```sh
+    CCACHE_KEEP=""
+    if [ -d openwrt/.ccache ]; then
+        CCACHE_KEEP=".ccache.keep.$$"
+        mv openwrt/.ccache "$CCACHE_KEEP"
+    fi
+    rm -rf openwrt
+    git clone --depth 1 -b "$TAG" "$UPSTREAM" openwrt
+    [ -n "$CCACHE_KEEP" ] && [ -d "$CCACHE_KEEP" ] && mv "$CCACHE_KEEP" openwrt/.ccache
+    ```
+    同时在 `build.yml` 编译前加 `du -sm "$CCACHE_DIR"` 告警（<10MB 说明缓存没恢复或首次构建）。
+
+    > **通用教训**：判定缓存是否生效，不能看 `actions/cache` 那句 "restored successfully"，也不能看 "有没有报错"。要看**消费方**的实际读数（`ccache -s` 的 Cache size / Hits）。中间任何一步 `rm -rf`、重新 clone、切目录，都可能把缓存抹掉而毫无提示。
 
 
 

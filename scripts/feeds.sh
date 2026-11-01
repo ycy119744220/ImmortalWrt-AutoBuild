@@ -8,8 +8,27 @@ TAG=${1:?用法: feeds.sh <immortalwrt-tag>}
 UPSTREAM=https://github.com/immortalwrt/immortalwrt.git
 
 echo "==> 克隆 ImmortalWrt ${TAG}"
+# ⚠️ 坑：actions/cache 把 ccache 恢复到 openwrt/.ccache，而下面紧跟着就要
+#    rm -rf openwrt —— 缓存会被整个删掉。表现极具欺骗性：
+#      actions/cache 打印 "Cache restored successfully / from key: ..."
+#      但编译步骤里 ccache -s 显示 "Cache size (GB): 0.0"，
+#      命中率只剩编译内部重复编译的 11%，跨运行命中为 0。
+#    实测 run 40453553423 -> 40462172910：前者存了 948MB，后者恢复到 0.0GB，
+#    且后者反而更慢（4757s vs 4051s，纯写入开销零收益）。
+#    修法：rm 之前把 .ccache 挪到工作区根（同一文件系统，rename 级开销），
+#    clone 完再归位。名称用 .ccache.keep 前缀，避免与任何源码目录重名。
+CCACHE_KEEP=""
+if [ -d openwrt/.ccache ]; then
+	CCACHE_KEEP=".ccache.keep.$$"
+	mv openwrt/.ccache "$CCACHE_KEEP"
+	echo "==> 暂存 ccache 缓存 $(du -sh "$CCACHE_KEEP" 2>/dev/null | cut -f1)，clone 后归位"
+fi
 rm -rf openwrt
 git clone --depth 1 -b "$TAG" "$UPSTREAM" openwrt
+if [ -n "$CCACHE_KEEP" ] && [ -d "$CCACHE_KEEP" ]; then
+	mv "$CCACHE_KEEP" openwrt/.ccache
+	echo "==> ccache 缓存已归位 $(du -sh openwrt/.ccache 2>/dev/null | cut -f1)"
+fi
 cd openwrt
 
 echo "==> 上游信息"
