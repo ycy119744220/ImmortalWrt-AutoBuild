@@ -200,7 +200,17 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
 
 1. **没有 `wg-quick`**。`wireguard-tools` 的 `install` 段只装 `wg`（见上游 Makefile，`$(INSTALL_BIN) $(PKG_BUILD_DIR)/src/wg`），不含 `wg-quick`。OpenWrt 用 UCI + netifd 管理，**不要**指望往 `/etc/wireguard/wg0.conf` 丢配置文件。命令行调试用 `wg show`，配置走 `uci set network.wg0=interface`。
 2. **没有 `luci-app-wireguard`**。已用 API 核实 `immortalwrt/luci` 仓库 `applications/` 下**不存在**这个包（`search/code` 返回 0）。新版界面已合并进 `luci-proto-wireguard`。写了会因符号不存在而告警。入口是**网络 → 接口 → 添加新接口 → 协议选 WireGuard VPN**，不是独立菜单。
-3. **加密原语缺一不可**。`kmod-wireguard` 的 `DEPENDS` 里有 `kmod-crypto-lib-chacha20poly1305` / `kmod-crypto-lib-curve25519`，kconfig 会自动解析，但固件自检仍单独断言它们 —— 少了会在 `insmod` 时报 `unknown symbol`，而不是构建失败，刷进去才发现连不上。
+3. **加密原语缺一不可，且文件名不能按包名猜**。`kmod-wireguard` 的 `DEPENDS` 里有 `kmod-crypto-lib-chacha20poly1305` / `kmod-crypto-lib-curve25519` / `kmod-udptunnel4`，kconfig 会自动解析。但**落盘文件名是 `lib` 前缀，不是包名里的 `crypto-` 前缀**：
+
+   | 包名 | 实际文件 |
+   |---|---|
+   | `crypto-lib-chacha20poly1305` | `lib/crypto/libchacha20poly1305.ko` |
+   | `crypto-lib-curve25519` | `lib/crypto/libcurve25519.ko` + `libcurve25519-generic.ko` + `arch/x86/crypto/curve25519-x86_64.ko` |
+   | `udptunnel4` | `net/ipv4/udp_tunnel.ko` |
+
+   固件自检曾按 `crypto_(chacha20poly1305|curve25519)\.ko` 匹配，**永远命中不了**，于是 `wireguard.ko` 在、加密模块也在，却报"缺少加密模块"（run `44010150256`）。现按真实文件名匹配，并把 **三个模块逐项检查**——不能"任一命中就放行"，因为只缺 `udp_tunnel.ko` 时 `wireguard.ko` 仍能 insmod（undefined symbol 延迟解析），但一建隧道就报 `Unknown device type`，比直接失败更难排查。
+   
+   > 判断依据一律以 `package/kernel/linux/modules/*.mk` 的 `FILES:=` 为准，不要按包名推断文件名。
 
 > 体积代价约 2MB（`wireguard.ko` ~350KB + 加密模块 ~300KB + `wg` ~100KB + LuCI/ucode ~1MB）。根分区 154MB / 512MB，余量充足。
 
