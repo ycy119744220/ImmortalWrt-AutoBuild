@@ -149,6 +149,37 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
 
     > **通用教训**：判定缓存是否生效，不能看 `actions/cache` 那句 "restored successfully"，也不能看 "有没有报错"。要看**消费方**的实际读数（`ccache -s` 的 Cache size / Hits）。中间任何一步 `rm -rf`、重新 clone、切目录，都可能把缓存抹掉而毫无提示。
 
+28. **`actions/cache` 的缓存可能"整份消失"，且没有任何提示**（2026-11-17，run `44010150256`）。这次表现更邪门：
+    - `actions/cache` 直接打印 `Cache not found for input keys: ccache-Linux-v25.12.2-44010150256, ccache-Linux-v25.12.2-, ccache-Linux-` —— 三层 restore-key **全部**未命中
+    - 紧接着 `git clone -b v25.12.2` 输出 `warning: refs/tags/v25.12.2 bfc8bae... is not a commit!`，`HEAD` 落到 `4fc16f2`（v25.12.2 是 **annotated tag**，tag 对象与 commit 哈希不同）
+    - 编译 3364 秒，ccache 命中率 11.16%（纯编译内部重复），**跨运行命中依旧为 0**
+
+    已排除的原因：源分支没变（`main` 一直是同一个 head）、`restore-keys` 语法正确、`cache` 写权限正常。最可能是上游把 v25.12.2 这个 annotated tag 重新打了（tag 对象变了 → 若 key 里带过 tag commit 就会全部落空），或者前几次运行把它挤出了配额。
+
+    **修法：不再依赖 `actions/cache` 的跨运行语义，改成显式 artifact 传递** ——
+    - 每次运行末尾 `tar -cf /tmp/ccache.tar -C openwrt/.ccache .`，用 `upload-artifact`（`retention-days: 3`、`compression-level: 1`）上传为 `ccache-tar`
+    - 下次运行开头用 `gh api` 翻最近 30 次运行，找**任意一次**带 `ccache-tar` 附件的运行，下载 zip → 解 tar 到 `openwrt/.ccache`
+    - 收益：缓存来源可见（日志里直接打印 "找到 ccache artifact: run xxx / 已下载 418MB / 已解压 812MB"），失败运行也能留缓存（`if: always()`），且不受 cache key 语义与 10GB cache 配额影响
+    - 兜底：找不到附件就 `echo "本次冷编译"` 并 `exit 0`，绝不因缓存问题让编译失败；`tar` 超过 700MB 也跳过上传，避免吃穿 artifact 配额
+
+    > 又一次验证第 27 条那句话：**缓存这件事永远要看消费方读数**。这次连 "Cache restored" 都没有，`actions/cache` 静默给了你一个"什么都没发生"，而编译照样能成功，只是慢 6 分钟。
+
+29. **固件自检把"加密原语以模块形式存在"判成了缺失**（run `44010150256`，唯一 FAIL 项）。`verify_firmware.sh` 原来写的是
+    ```sh
+    grep -qE '^lib/modules/[^/]+/crypto_(chacha20poly1305|curve25519[^/]*)\.ko$'
+    ```
+    实际 6.12 内核里这两个原语落在 **`lib/crypto/`**，不在 `lib/modules/<ver>/`，文件名也没有 `crypto_` 前缀：
+    ```
+    lib/crypto/chacha20poly1305.ko
+    lib/crypto/curve25519-x86_64.ko      # x86 还有 AVX2 / ADX / BMI2 变体
+    ```
+    另外它们也可能被上游直接 `=y` 编进 `vmlinuz`，此时 rootfs 里**根本没有 `.ko` 文件**，但功能完全正常。
+
+    **修法**：三层判断 —— ① 任意路径下存在 `chacha20poly1305.ko` / `curve25519*.ko`；② 否则读 `modules.builtin`（`tar -xOzf` 直接从包里取）看是否内建；③ 两者都没有才 FAIL。三种情形分别输出 `加密原语模块：...` / `加密原语已内建进内核：...` / FAIL，本地用三个合成 tar 包逐一验证过。
+
+    > 教训：固件自检的断言要写「功能存在」，不是「我印象中的文件名」。同理，`kmod-wireguard` 本身没这条歧义（`drivers/net/wireguard/wireguard.ko` 路径稳定），但凡是 `kmod-crypto-*` 这类跟内核源码目录走的东西，路径都不可想当然。
+
+
 
 
 实测数值（2026-10）：内核下载 22MB → 解压 62MB；Country.mmdb 7.6MB、GeoSite.dat 4.3MB、GeoIP.dat 16.5MB、ASN.mmdb 9.0MB。下载走 `github.com` 直连，失败自动切 `gh-proxy.com` 加速再回退直连（三通道重试）。

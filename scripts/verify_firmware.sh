@@ -83,8 +83,7 @@ has etc/config/upnpd || true
 echo "==> WireGuard（内核模块 + wg 命令 + netifd 协议 + LuCI 界面）"
 # 四层都要在，缺任一层功能就是断的：
 #   1) 内核模块      lib/modules/<ver>/wireguard.ko
-#      加密原语也要在，否则 insmod 时报 unknown symbol：
-#                    crypto_chacha20poly1305.ko / curve25519*.ko / udp_tunnel.ko
+#      加密原语也要在，否则 insmod 时报 unknown symbol（判据见下方注释）
 #   2) 用户态命令    usr/bin/wg
 #   3) netifd 协议   lib/netifd/proto/wireguard.sh
 #                    （OpenWrt 靠它把 UCI 配置翻译成 wg 命令，没有它 LuCI 存不进内核）
@@ -106,11 +105,39 @@ else
 	echo "    FAIL    缺少 WireGuard 组件：$wg_missing"
 	fail=$((fail + 1))
 fi
-# 加密原语：名字随内核版本有差异，用宽松匹配，只要命中即可
-if grep -qE '^lib/modules/[^/]+/crypto_(chacha20poly1305|curve25519[^/]*)\.ko$' "$LIST"; then
-	echo "    OK      加密原语（chacha20poly1305 / curve25519）"
+# 加密原语：run 44010150256 的误报就出在这里，判据必须按**真实文件名**写。
+#   上游 package/kernel/linux/modules/crypto.mk（v25.12.2 实测）：
+#     KernelPackage/crypto-lib-chacha20poly1305  FILES=lib/crypto/libchacha20poly1305.ko
+#     KernelPackage/crypto-lib-chacha20          FILES=lib/crypto/libchacha.ko
+#     KernelPackage/crypto-lib-poly1305          FILES=lib/crypto/libpoly1305.ko
+#     KernelPackage/crypto-lib-curve25519        FILES=lib/crypto/libcurve25519.ko
+#                                                      +libcurve25519-generic.ko
+#                                                      +arch/x86/crypto/curve25519-x86_64.ko
+#     KernelPackage/udptunnel4                   FILES=net/ipv4/udp_tunnel.ko
+#   即：文件名带 **lib 前缀**（libchacha20poly1305.ko），不是包名里的
+#   crypto-xxx.ko。早先按包名猜前缀写成 `crypto_(chacha20poly1305|...)\.ko`，
+#   永远匹配不到 → wireguard.ko 和加密模块都在，却报"缺少加密模块"。
+#   另：这些模块可能被上游直接 =y 编进 vmlinuz，此时 rootfs 里没有 .ko 但功能正常，
+#   所以判据分两层：有 .ko 模块 → 查 modules.builtin 内建 → 都没有才报错。
+#   ⚠️ 三个必须**全部**具备，不能用"任一命中"放行：实测只缺 udp_tunnel.ko
+#   时 wireguard.ko 仍能 insmod（undefined symbol 是延迟解析的），
+#   但一建隧道就报 "Unknown device type"，比 insmod 直接失败更难排查。
+wg_crypto_hit=$(grep -E '(^|/)lib(chacha20poly1305|curve25519[a-z0-9_\-]*)\.ko$|(^|/)udp_tunnel\.ko$' "$LIST" || true)
+wg_crypto_builtin=""
+if grep -qE '^lib/modules/[^/]+/modules\.builtin$' "$LIST"; then
+	wg_crypto_builtin=$(tar -xOzf "$ROOTFS" --wildcards '*/lib/modules/*/modules.builtin' 2>/dev/null \
+		| grep -E '(chacha20poly1305|curve25519|udp_tunnel)' || true)
+fi
+# 三者逐项检查，.ko 与 builtin 合并成同一份"可用符号表"再判
+wg_avail=$(printf '%s\n%s\n' "$wg_crypto_hit" "$wg_crypto_builtin")
+wg_crypto_missing=""
+for k in chacha20poly1305 curve25519 udp_tunnel; do
+	if ! printf '%s' "$wg_avail" | grep -q "$k"; then wg_crypto_missing="$wg_crypto_missing $k"; fi
+done
+if [ -z "$wg_crypto_missing" ]; then
+	echo "    OK      加密原语齐全（$(echo "$wg_crypto_hit" | tr '\n' ' ')${wg_crypto_builtin:+ +内建})"
 else
-	echo "    FAIL    缺少 WireGuard 依赖的加密模块（会 insmod 失败）"
+	echo "    FAIL    缺少 WireGuard 加密原语：$wg_crypto_missing（建隧道会报 Unknown device type）"
 	fail=$((fail + 1))
 fi
 

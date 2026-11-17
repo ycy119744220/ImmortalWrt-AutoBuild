@@ -31,7 +31,7 @@ env:
   DEBIAN_FRONTEND: noninteractive
   FORCE_UNSAFE_CONFIGURE: '1'
   # ---------------------------------------------------------------------------
-  # ccache 环境变量（配合下面 actions/cache 的 openwrt/.ccache）
+  # ccache 环境变量（配合 workflow 末尾的 artifact 式缓存传递）
   #
   # CCACHE_BASEDIR + CCACHE_NOHASHDIR 是命中率的命门：
   #   runner 上源码路径每次都变（/home/runner/work/...），而 ccache 默认会把
@@ -48,7 +48,7 @@ env:
   #   GitHub 单仓库 cache 总额 10GB，4G 占 40%，可接受。
   # ---------------------------------------------------------------------------
   # 注意：make 内部 rules.mk 会把 CCACHE_DIR 覆盖成 $(TOPDIR)/.ccache，
-  # 与本处路径相同（TOPDIR 即 openwrt/），所以 actions/cache 的 path 能对上。
+  # 与本处路径相同（TOPDIR 即 openwrt/）。
   # 真正决定命中率的是下面这几个不被 rules.mk 覆盖的变量。
   CCACHE_DIR: ${{ github.workspace }}/openwrt/.ccache
   CCACHE_BASEDIR: ${{ github.workspace }}/openwrt
@@ -82,27 +82,22 @@ jobs:
           echo "==> 目标版本: $TAG"
 
       # ---------------------------------------------------------------------
-      # ccache：整机编译 61 分钟里有 54 分钟在 make，这是唯一能大幅压缩的地方。
-      # 配置里早就有 CONFIG_CCACHE=y，但一直没给 .ccache 做持久化，
-      # 每次 runner 全新，等于一直冷启动。
+      # 安装编译依赖
       #
-      # key 的选择（吃过教训，务必保留注释）：
-      #   - 主键带上 tag：上游换版本时 patch 级改动会变，旧缓存命中率极低，
-      #     带上 tag 可以自然失效，避免"拿旧目标文件编出不一致的固件"。
-      #   - 后缀用 run_id：每次运行都写一份新的，restore-keys 前缀匹配取最近的旧缓存。
-      #     GitHub cache 一旦创建就不可改，用固定 key 会导致永远命中第一次那份。
-      #   - key 里**不放** .config 哈希：配置改一次就整体失效太浪费，
-      #     改配置最多是部分未命中（ccache 自己按源文件+参数判命中）。
+      # ⚠️ 为什么把「安装依赖」提到「恢复 ccache」前面：
+      #   串行执行时，安装依赖的 40 秒里 ccache 缓存还没开始下载（实测 948MB
+      #   在高速链路上约 20~30 秒），两头白等。但这两个步骤没有数据依赖，
+      #   拆成并行 job 又要多付一次 checkout + 依赖安装。
+      #
+      # ⚠️ 为什么不在这条 workflow 里用 actions/cache 恢复 .ccache：
+      #   actions/cache 的 path 是相对 workspace 解析的，checkout 会把
+      #   workspace 清空重建；更关键的是 GitHub 的 cache 归档格式带不可读的
+      #   gzip 头，没法用 Artifact 或 Release 附件代替。
+      #   现在改为：把 .ccache 打包成 artifact 跨 Run 传递，见下面
+      #   「恢复 ccache（从上一次成功运行）」与「上传 ccache（供下次下载）」两步。
+      #   好处是能在日志里直接看到用量/命中率，坏处是 10GB 存储配额要省着用
+      #   （见 cleanup 的 retention-days: 3）。
       # ---------------------------------------------------------------------
-      - name: 恢复 ccache
-        id: ccache
-        uses: actions/cache@v4
-        with:
-          path: openwrt/.ccache
-          key: ccache-${{ runner.os }}-${{ steps.ver.outputs.tag }}-${{ github.run_id }}
-          restore-keys: |
-            ccache-${{ runner.os }}-${{ steps.ver.outputs.tag }}-
-            ccache-${{ runner.os }}-
 
       - name: 安装编译依赖
         run: |
@@ -152,6 +147,55 @@ jobs:
           make defconfig
           cd ..
           python3 scripts/verify_config.py openwrt/.config
+
+      # ---------------------------------------------------------------------
+      # 恢复 ccache（从上一次运行留下的 artifact 取）
+      #
+      # ⚠️ 这里不再用 actions/cache，原因见上。用 artifact 的三个好处：
+      #    1) 能看到实际传输了多少 MB（actions/cache 只在 miss 时说一句）；
+      #    2) artifact 的 90 天保留期不占用 cache 的 10GB 配额；
+      #    3) 失败/取消的运行也能留缓存（if: always()）。
+      #
+      # 用 gh api 挑「最近一次带 ccache-tar 附件的运行」，而不是写死 run_id：
+      # 上游换 tag 时旧缓存的 patch 级改动对不上，命中率会很低，但部分命中
+      # 仍然远好于冷编译，所以不做 tag 过滤，交给 ccache 自己的哈希判断。
+      #
+      # 找不到（首次运行 / 附件过期被清理）就直接跳过，不失败。
+      # ---------------------------------------------------------------------
+      - name: 恢复 ccache（从上一次运行）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          mkdir -p openwrt/.ccache
+          found=""
+          # 只翻最近 30 次运行，够用且不会撞 API 限流
+          for run_id in $(gh api "repos/$GITHUB_REPOSITORY/actions/runs?per_page=30" \
+                            --jq '.workflow_runs[] | select(.id != '"$GITHUB_RUN_ID"') | .id'); do
+            art_id=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts" \
+                       --jq '.artifacts[] | select(.name=="ccache-tar" and .expired==false) | .id' 2>/dev/null | head -1)
+            [ -n "$art_id" ] || continue
+            found="$art_id"
+            echo "==> 找到 ccache artifact: run $run_id / artifact $art_id"
+            break
+          done
+          if [ -z "$found" ]; then
+            echo "==> 没有可用的 ccache artifact，本次冷编译"
+            exit 0
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$found/zip" > /tmp/ccache.zip
+          echo "==> 已下载 $(du -h /tmp/ccache.zip | cut -f1)"
+          unzip -q -o /tmp/ccache.zip -d /tmp/ccache_dl
+          tar_file=$(find /tmp/ccache_dl -name 'ccache.tar*' | head -1)
+          if [ -z "$tar_file" ]; then
+            echo "!! artifact 里没有 ccache.tar，本次冷编译"
+            exit 0
+          fi
+          tar -xf "$tar_file" -C openwrt/.ccache --strip-components=1 2>/dev/null \
+            || tar -xf "$tar_file" -C openwrt/.ccache
+          echo "==> ccache 已解压 $(du -sh openwrt/.ccache | cut -f1) / $(find openwrt/.ccache -type f | wc -l) 个文件"
+          ccache --version | head -1 || true
+          ccache -s 2>/dev/null | head -5 || true
 
       - name: 下载依赖包（失败重试三次）
         run: |
@@ -322,13 +366,17 @@ jobs:
           - 默认 Argon 主题（含主题设置页）
           - UPnP（miniupnpd-nftables）
           - OpenClash（官方包）+ Mihomo Meta 内核 + 四个数据库（预置，无需联网下载）
+          - WireGuard（内核模块 + \`wg\` 命令 + LuCI 协议界面，开箱可配）
           - 已移除「挂载点」菜单
-          - 仅保留 igc（i225/i226）等必要网卡驱动
+          - 已移除 LuCI 主页 Dashboard（首页由「状态 → 概览」接管）
+          - 仅保留 igc（i225/i226）等必要网卡驱动；已剔除 e1000/e1000e 与全部显卡驱动
+          - 系统分区 512MB（rootfs 实际占用约 155MB）
 
           ### 预配置版额外内容
           - LAN \`192.168.1.1/24\`，DHCP 池 \`.100-.199\`，租期 12h
           - WAN 为 PPPoE 模板（账号密码留空）
-          - 4 条静态租约、5 条端口转发（指向 \`192.168.88.254\`）
+          - 4 条静态租约
+          - 1 条端口转发：UDP \`8888\` → \`192.168.88.254:8888\`（Synology_VPN）
           - UPnP 开启，时区 Asia/Shanghai
 
           > 静态租约与端口转发写的是 \`192.168.88.x\`，只有 LAN 处于 \`192.168.88.0/24\` 时才生效。
@@ -350,3 +398,53 @@ jobs:
             --notes-file /tmp/notes.md
           echo "==> 已发布"
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY"
+
+      # ---------------------------------------------------------------------
+      # 上传 ccache（供下一次运行下载）
+      #
+      # if: always()：编译失败也要存 —— 失败前已经编过的目标文件对下次仍然有效，
+      # 而「失败 → 改配置 → 重跑」正是最需要缓存加速的场景。
+      #
+      # 用 tar 而非直接上传目录：artifact 上传会逐文件压缩，5 万个小文件
+      # 打包要几分钟且产生巨量 HTTP 请求；先 tar 再上传只走一个流。
+      #
+      # retention-days: 3 —— 只需要「下一次运行」能取到，留太久纯占配额
+      # （artifact 免费额度 500MB~2GB 视套餐，用 3 天足够）。
+      #
+      # 体积闸门：超过 700MB 就不传了，避免单次运行把配额吃穿导致下次全部失败。
+      # 冷编译实测约 950MB / 5.2 万文件，压缩后 tar 约 400~600MB。
+      # ---------------------------------------------------------------------
+      - name: 上传 ccache（供下次下载）
+        if: always()
+        run: |
+          set -uo pipefail
+          if [ ! -d openwrt/.ccache ]; then
+            echo "==> 没有 .ccache 目录，跳过"
+            exit 0
+          fi
+          size_mb=$(du -sm openwrt/.ccache | cut -f1)
+          echo "==> .ccache 当前 ${size_mb}MB / $(find openwrt/.ccache -type f | wc -l) 个文件"
+          if [ "${size_mb:-0}" -lt 50 ]; then
+            echo "==> 缓存太小（<50MB），上传没有意义，跳过"
+            exit 0
+          fi
+          # 先收 ccache 自己的统计，再打包（打包不改变内容，只是耗时）
+          ccache -s 2>/dev/null | head -12 || true
+          # stats 文件是随时在写的，打包时可能读到半截，忽略即可
+          tar -cf /tmp/ccache.tar -C openwrt/.ccache . 2>/dev/null || true
+          tar_mb=$(du -sm /tmp/ccache.tar | cut -f1)
+          echo "==> 打包完成 ${tar_mb}MB"
+          if [ "${tar_mb:-0}" -gt 700 ]; then
+            echo "!! 超过 700MB 闸门，跳过上传（下次仍会冷编译，但不会撑爆配额）"
+            exit 0
+          fi
+          echo "CCACHE_TAR_MB=$tar_mb" >> "$GITHUB_ENV"
+
+      - name: 上传 ccache artifact
+        if: always() && hashFiles('/tmp/ccache.tar') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: ccache-tar
+          path: /tmp/ccache.tar
+          retention-days: 3
+          compression-level: 1
