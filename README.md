@@ -194,7 +194,25 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
 
 31. **push 触发的 preflight 会掩盖 build 的失败**。`preflight.yml` 原来的 `paths` 覆盖 `config/**`、`scripts/**`、`package/**`、`files/**`，于是每次推修复都会连带触发 preflight，它 5~8 分钟就绿了。而 `build` 是 `workflow_dispatch` 触发的，一跑 50~90 分钟。结果操作者看到"最近一次运行成功"，实际是 preflight，真正在编译的 build 可能已经红了。现已把 `paths` 收窄到只剩 `.github/workflows/preflight.yml`，需要时手动 `workflow_dispatch`。
 
-    > 同一次会话里还撞了两次 `concurrency` 冲突：push 时 `preflight` 触发、`build` 也因 `workflow_call` 被拉起，两者用同一个 group 名 `build-latest`（`inputs.tag` 为空时落到 `latest`），后到的会把先到的 `cancelled` 掉。`cancel-in-progress: false` 只保证不取消**正在运行**的，排队中的仍会被新任务顶掉。
+    > 同一次会话里还撞了一次 `concurrency` 冲突：push 时 `preflight` 触发、`build` 也因 `workflow_call` 被拉起，两者用同一个 group 名 `build-latest`（`inputs.tag` 为空时落到 `latest`），后到的把先到的顶成 `cancelled`。
+
+32. **`hashFiles()` 在 job 级 `if` 里拿不到上一步刚生成的文件**（run `44029752657`）。为了让 ccache 打包完才上传，写了
+    ```yaml
+    if: always() && hashFiles('/tmp/ccache.tar') != ''
+    ```
+    结果上一步日志明明打印 `==> 打包完成 876MB`，这一步却是 **skipped**，artifact 一个都没有：
+
+    ```
+    21 上传 ccache（供下次下载）  completed  success
+    22 上传 ccache artifact        completed  skipped    ← 白打包
+    ```
+
+    原因两点叠加：① `hashFiles()` 是表达式函数，在 **job 开始前**求值一次（文档也只承诺它对 workspace 内文件有效），那一刻 `/tmp/ccache.tar` 还不存在；② job/step 级 `if` 永远不会被前面 shell 步骤新建的文件影响。
+
+    **修法**：上一步声明 `id: ccache_pack` 并写 `$GITHUB_OUTPUT`（先 `ready=false`，过体积闸门后才改成 `ready=true`），下一步 `if: always() && steps.ccache_pack.outputs.ready == 'true'`。step outputs 是运行期产生的，没有这个求值时机问题。
+
+    > 教训：GitHub Actions 的表达式求值时机很反直觉 —— **凡是"根据前面步骤的产物决定要不要跑"，一律用 `outputs`，不要用 `hashFiles()` / `exists()` 之类探测文件的函数。**
+
 
 
 

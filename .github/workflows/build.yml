@@ -413,6 +413,7 @@ jobs:
       # 体积闸门：超过 1.9GB 就不传，避免把配额吃穿导致下一次上传整体失败。
       # ---------------------------------------------------------------------
       - name: 上传 ccache（供下次下载）
+        id: ccache_pack
         if: always()
         run: |
           set -uo pipefail
@@ -432,14 +433,27 @@ jobs:
           tar -cf /tmp/ccache.tar -C openwrt/.ccache . 2>/dev/null || true
           tar_mb=$(du -sm /tmp/ccache.tar | cut -f1)
           echo "==> 打包完成 ${tar_mb}MB"
+          # 先把 ready 置成 false，过闸门后才改成 true —— 这样中途任何 exit
+          # 都不会让上传步骤误跑。
+          echo "ready=false" >> "$GITHUB_OUTPUT"
           if [ "${tar_mb:-0}" -gt 1900 ]; then
             echo "!! 超过 1.9GB 闸门，跳过上传（下次仍会冷编译，但不会撑爆配额）"
             exit 0
           fi
-          echo "CCACHE_TAR_MB=$tar_mb" >> "$GITHUB_ENV"
+          echo "ready=true" >> "$GITHUB_OUTPUT"
 
       - name: 上传 ccache artifact
-        if: always() && hashFiles('/tmp/ccache.tar') != ''
+        # ⚠️ 这里的条件写法踩过坑（run 44029752657）：用
+        #     if: always() && hashFiles('/tmp/ccache.tar') != ''
+        #   时这一步被 **skipped**，明明上一步刚打印「打包完成 876MB」。
+        #   原因有两个叠加：
+        #     1) hashFiles() 是表达式函数，在 **job 开始前**由 runner 求值一次
+        #        （文档明确说它只对 workspace 内文件有意义），此时 /tmp/ccache.tar
+        #        根本不存在 → 返回空串 → 条件为假；
+        #     2) 就算能求值，job 级 if 不会被前面 shell 步骤创建的临时文件影响。
+        #   改用 step 输出（outputs）传递：outputs 是运行期产生的，
+        #   不受 job 开始前求值限制，上一步 shell 在过闸门后写 ready=true。
+        if: always() && steps.ccache_pack.outputs.ready == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: ccache-tar
