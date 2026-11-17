@@ -117,6 +117,14 @@ fi
 #   即：文件名带 **lib 前缀**（libchacha20poly1305.ko），不是包名里的
 #   crypto-xxx.ko。早先按包名猜前缀写成 `crypto_(chacha20poly1305|...)\.ko`，
 #   永远匹配不到 → wireguard.ko 和加密模块都在，却报"缺少加密模块"。
+#   run 44010150256 第一次报错就栽在这里；改成下面这条真实前缀的规则后
+#   run 44018327277 自检通过，实测路径为（modinfo 的 filename 字段）：
+#     lib/modules/6.12.103/libchacha20poly1305.ko
+#     lib/modules/6.12.103/libcurve25519-generic.ko
+#     lib/modules/6.12.103/libcurve25519.ko
+#     lib/modules/6.12.103/udp_tunnel.ko
+#   ⚠️ 注意 kmod 包安装时会把 ko 从 lib/crypto/ 搬到 lib/modules/<ver>/ 下，
+#   所以只用 `(^|/)lib...\.ko$` 匹配文件名本身，不锁死目录。
 #   另：这些模块可能被上游直接 =y 编进 vmlinuz，此时 rootfs 里没有 .ko 但功能正常，
 #   所以判据分两层：有 .ko 模块 → 查 modules.builtin 内建 → 都没有才报错。
 #   ⚠️ 三个必须**全部**具备，不能用"任一命中"放行：实测只缺 udp_tunnel.ko

@@ -84,19 +84,14 @@ jobs:
       # ---------------------------------------------------------------------
       # 安装编译依赖
       #
-      # ⚠️ 为什么把「安装依赖」提到「恢复 ccache」前面：
-      #   串行执行时，安装依赖的 40 秒里 ccache 缓存还没开始下载（实测 948MB
-      #   在高速链路上约 20~30 秒），两头白等。但这两个步骤没有数据依赖，
-      #   拆成并行 job 又要多付一次 checkout + 依赖安装。
+      # 顺序说明：这一步必须在「恢复 ccache」之前，因为它负责装 ccache 二进制。
+      # 缓存恢复本身用 artifact（见 165 行起），与 apt 无依赖关系。
       #
-      # ⚠️ 为什么不在这条 workflow 里用 actions/cache 恢复 .ccache：
-      #   actions/cache 的 path 是相对 workspace 解析的，checkout 会把
-      #   workspace 清空重建；更关键的是 GitHub 的 cache 归档格式带不可读的
-      #   gzip 头，没法用 Artifact 或 Release 附件代替。
-      #   现在改为：把 .ccache 打包成 artifact 跨 Run 传递，见下面
-      #   「恢复 ccache（从上一次成功运行）」与「上传 ccache（供下次下载）」两步。
-      #   好处是能在日志里直接看到用量/命中率，坏处是 10GB 存储配额要省着用
-      #   （见 cleanup 的 retention-days: 3）。
+      # 为什么不在这条 workflow 里用 actions/cache 恢复 .ccache：
+      #   实测三次"恢复了但没生效"（README 第 21/22/27 条），最后连
+      #   `Cache not found for input keys: ...` 三层全落空（第 28 条）。
+      #   现在改为：把 .ccache 打包成 artifact 跨 Run 传递。
+      #   好处是日志里能看到实际下载/解压了多少 MB，失败运行也能留缓存。
       # ---------------------------------------------------------------------
 
       - name: 安装编译依赖
@@ -408,11 +403,14 @@ jobs:
       # 用 tar 而非直接上传目录：artifact 上传会逐文件压缩，5 万个小文件
       # 打包要几分钟且产生巨量 HTTP 请求；先 tar 再上传只走一个流。
       #
-      # retention-days: 3 —— 只需要「下一次运行」能取到，留太久纯占配额
-      # （artifact 免费额度 500MB~2GB 视套餐，用 3 天足够）。
+      # retention-days: 1 —— 只需要「下一次运行」能取到。
+      #   为什么是 1 天：公开仓库 artifact 免费额度是 500MB / 2GB 套餐，
+      #   实测冷编译后 .ccache 953MB / 5.2 万文件 → tar 出来 **876MB**
+      #   （run 44018327277 实测），早先设的 700MB 闸门直接把它拦了，
+      #   等于缓存永远建不起来。现闸门放到 1.9GB，保留 1 天，
+      #   保证同一时间只有一个 ccache 包占配额。
       #
-      # 体积闸门：超过 700MB 就不传了，避免单次运行把配额吃穿导致下次全部失败。
-      # 冷编译实测约 950MB / 5.2 万文件，压缩后 tar 约 400~600MB。
+      # 体积闸门：超过 1.9GB 就不传，避免把配额吃穿导致下一次上传整体失败。
       # ---------------------------------------------------------------------
       - name: 上传 ccache（供下次下载）
         if: always()
@@ -434,8 +432,8 @@ jobs:
           tar -cf /tmp/ccache.tar -C openwrt/.ccache . 2>/dev/null || true
           tar_mb=$(du -sm /tmp/ccache.tar | cut -f1)
           echo "==> 打包完成 ${tar_mb}MB"
-          if [ "${tar_mb:-0}" -gt 700 ]; then
-            echo "!! 超过 700MB 闸门，跳过上传（下次仍会冷编译，但不会撑爆配额）"
+          if [ "${tar_mb:-0}" -gt 1900 ]; then
+            echo "!! 超过 1.9GB 闸门，跳过上传（下次仍会冷编译，但不会撑爆配额）"
             exit 0
           fi
           echo "CCACHE_TAR_MB=$tar_mb" >> "$GITHUB_ENV"
@@ -446,5 +444,7 @@ jobs:
         with:
           name: ccache-tar
           path: /tmp/ccache.tar
-          retention-days: 3
-          compression-level: 1
+          retention-days: 1
+          # 0 = 不再压缩：ccache 内容本身已是二进制目标文件，gzip 收益 <10%，
+          # 上压缩只会把上传 CPU 时间从秒级拖到分钟级。
+          compression-level: 0

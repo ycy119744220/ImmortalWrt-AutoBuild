@@ -149,6 +149,8 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
 
     > **通用教训**：判定缓存是否生效，不能看 `actions/cache` 那句 "restored successfully"，也不能看 "有没有报错"。要看**消费方**的实际读数（`ccache -s` 的 Cache size / Hits）。中间任何一步 `rm -rf`、重新 clone、切目录，都可能把缓存抹掉而毫无提示。
 
+    > **现状（2026-11-17 起）**：已彻底弃用 `actions/cache`，改为 artifact 显式传递（见第 28、30 条）。`feeds.sh` 里那段 `.ccache.keep.$$` 暂存逻辑**保留**，因为 clone 覆盖目录这件事本身没变。
+
 28. **`actions/cache` 的缓存可能"整份消失"，且没有任何提示**（2026-11-17，run `44010150256`）。这次表现更邪门：
     - `actions/cache` 直接打印 `Cache not found for input keys: ccache-Linux-v25.12.2-44010150256, ccache-Linux-v25.12.2-, ccache-Linux-` —— 三层 restore-key **全部**未命中
     - 紧接着 `git clone -b v25.12.2` 输出 `warning: refs/tags/v25.12.2 bfc8bae... is not a commit!`，`HEAD` 落到 `4fc16f2`（v25.12.2 是 **annotated tag**，tag 对象与 commit 哈希不同）
@@ -164,20 +166,36 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
 
     > 又一次验证第 27 条那句话：**缓存这件事永远要看消费方读数**。这次连 "Cache restored" 都没有，`actions/cache` 静默给了你一个"什么都没发生"，而编译照样能成功，只是慢 6 分钟。
 
-29. **固件自检把"加密原语以模块形式存在"判成了缺失**（run `44010150256`，唯一 FAIL 项）。`verify_firmware.sh` 原来写的是
+29. **固件自检把"加密原语以模块形式存在"判成了缺失**（run `44010150256` 唯一的 FAIL 项，也是本次唯一一次"编译成功但流程变红"）。`verify_firmware.sh` 原来写的是
     ```sh
     grep -qE '^lib/modules/[^/]+/crypto_(chacha20poly1305|curve25519[^/]*)\.ko$'
     ```
-    实际 6.12 内核里这两个原语落在 **`lib/crypto/`**，不在 `lib/modules/<ver>/`，文件名也没有 `crypto_` 前缀：
+    猜错了前缀。看上游 `package/kernel/linux/modules/crypto.mk` 才知道名字带 **`lib`** 前缀，而且**安装时会从 `lib/crypto/` 搬到 `lib/modules/<ver>/` 下**。run `44018327277` 通过后实测路径为：
     ```
-    lib/crypto/chacha20poly1305.ko
-    lib/crypto/curve25519-x86_64.ko      # x86 还有 AVX2 / ADX / BMI2 变体
+    lib/modules/6.12.103/libchacha20poly1305.ko
+    lib/modules/6.12.103/libcurve25519-generic.ko
+    lib/modules/6.12.103/libcurve25519.ko
+    lib/modules/6.12.103/udp_tunnel.ko
     ```
-    另外它们也可能被上游直接 `=y` 编进 `vmlinuz`，此时 rootfs 里**根本没有 `.ko` 文件**，但功能完全正常。
+    最终判据：`(^|/)lib(chacha20poly1305|curve25519[a-z0-9_-]*)\.ko$` 或 `(^|/)udp_tunnel\.ko$`，**三者必须全部命中**（`chacha20poly1305` / `curve25519` / `udp_tunnel`），不能用"任一命中"放行 —— 只缺 `udp_tunnel.ko` 时 `wireguard.ko` 仍能 `insmod`（undefined symbol 是延迟解析的），但一建隧道就报 `Unknown device type`，比直接失败更难查。再加上 `modules.builtin` 兜底（原语可能被 `=y` 编进 `vmlinuz`，此时没有 `.ko` 文件）。
 
-    **修法**：三层判断 —— ① 任意路径下存在 `chacha20poly1305.ko` / `curve25519*.ko`；② 否则读 `modules.builtin`（`tar -xOzf` 直接从包里取）看是否内建；③ 两者都没有才 FAIL。三种情形分别输出 `加密原语模块：...` / `加密原语已内建进内核：...` / FAIL，本地用三个合成 tar 包逐一验证过。
+    > 教训：固件自检的断言要写「功能存在」，不是「我印象中的文件名」。历史上这个项目的自检假失败/假通过各出现过一次（第 7 条是假通过，本条是假失败），两次的共同点都是**凭猜写断言**。
 
-    > 教训：固件自检的断言要写「功能存在」，不是「我印象中的文件名」。同理，`kmod-wireguard` 本身没这条歧义（`drivers/net/wireguard/wireguard.ko` 路径稳定），但凡是 `kmod-crypto-*` 这类跟内核源码目录走的东西，路径都不可想当然。
+30. **ccache 的 artifact 闸门把自己卡死了**（run `44018327277`）。修好第 28 条后改用 artifact 传递缓存，但闸门设了 700MB，实测 `tar` 出来是 **876MB**：
+    ```
+    ==> 打包完成 876MB
+    !! 超过 700MB 闸门，跳过上传（下次仍会冷编译，但不会撑爆配额）
+    ```
+    于是"缓存机制"第一轮跑完等于没装。同时命中率显示 11.04%、耗时 5282 秒（比之前 3001 秒那次更慢），双重印证缓存确实没接上。
+
+    **修法**：闸门放到 1.9GB（公开仓库 artifact 单件上限 2GB），`retention-days: 1` 保证同时只存在一份，`compression-level: 0` 不再 gzip（ccache 内容本就是二进制目标文件，压缩收益 <10% 却要多烧几分钟 CPU）。
+
+    > 教训：给缓存设"安全阈值"时，阈值必须来自**实测体积**，不能凭感觉。876MB 这个数字是拿到之后才写进去的 —— 第一版凭感觉写 700MB，正好卡在中间。
+
+31. **push 触发的 preflight 会掩盖 build 的失败**。`preflight.yml` 原来的 `paths` 覆盖 `config/**`、`scripts/**`、`package/**`、`files/**`，于是每次推修复都会连带触发 preflight，它 5~8 分钟就绿了。而 `build` 是 `workflow_dispatch` 触发的，一跑 50~90 分钟。结果操作者看到"最近一次运行成功"，实际是 preflight，真正在编译的 build 可能已经红了。现已把 `paths` 收窄到只剩 `.github/workflows/preflight.yml`，需要时手动 `workflow_dispatch`。
+
+    > 同一次会话里还撞了两次 `concurrency` 冲突：push 时 `preflight` 触发、`build` 也因 `workflow_call` 被拉起，两者用同一个 group 名 `build-latest`（`inputs.tag` 为空时落到 `latest`），后到的会把先到的 `cancelled` 掉。`cancel-in-progress: false` 只保证不取消**正在运行**的，排队中的仍会被新任务顶掉。
+
 
 
 
