@@ -13,10 +13,6 @@ on:
   push:
     branches: [main]
     paths:
-      - 'config/**'
-      - 'scripts/**'
-      - 'package/**'
-      - 'files/**'
       - '.github/workflows/preflight.yml'
 
 permissions:
