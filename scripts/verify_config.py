@@ -45,6 +45,17 @@ MUST_Y_STRICT = [
     # `ifneq ($(CONFIG_CCACHE),)` 不成立，ccache 全程不参与编译。
     # 实际案例：run 40445331733 编译 4051 秒，ccache 前后都是 0.0GB。
     ("ccache 加速（DEVEL 缺失会导致 CCACHE 被静默丢弃）", ["DEVEL", "CCACHE"]),
+    # WireGuard 三件套：用户明确要求"内置在固件中"，缺任一个功能就是断的：
+    #   只有 kmod 没 tools   → 内核支持但没法配置（没有 wg 命令）
+    #   只有 tools 没 kmod   → wg 能跑，但 netlink 报 "Protocol not supported"
+    #   没有 luci-proto      → 命令行可用，但 LuCI 里选不到 WireGuard 协议
+    # 依赖（chacha20poly1305 / curve25519 / udptunnel4/6 / ucode / uqr / resolveip）
+    # 由 kconfig 自动解析，这里只断言直接选中的三个。
+    # 放严格组而非 MUST_Y：包名万一被上游改名，MUST_Y 只 WARN，
+    # 构建照样绿、固件照样发，但功能静默消失 —— 这比构建失败更糟。
+    ("WireGuard VPN（内核模块 + 工具 + LuCI 界面）",
+     ["PACKAGE_kmod-wireguard", "PACKAGE_wireguard-tools",
+      "PACKAGE_luci-proto-wireguard"]),
 ]
 # 必须关闭
 MUST_N = [

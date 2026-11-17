@@ -80,6 +80,40 @@ echo "==> UPnP"
 if grep -q 'miniupnpd' "$LIST"; then echo "    OK      miniupnpd"; else echo "    FAIL    没有 miniupnpd"; fail=$((fail + 1)); fi
 has etc/config/upnpd || true
 
+echo "==> WireGuard（内核模块 + wg 命令 + netifd 协议 + LuCI 界面）"
+# 四层都要在，缺任一层功能就是断的：
+#   1) 内核模块      lib/modules/<ver>/wireguard.ko
+#      加密原语也要在，否则 insmod 时报 unknown symbol：
+#                    crypto_chacha20poly1305.ko / curve25519*.ko / udp_tunnel.ko
+#   2) 用户态命令    usr/bin/wg
+#   3) netifd 协议   lib/netifd/proto/wireguard.sh
+#                    （OpenWrt 靠它把 UCI 配置翻译成 wg 命令，没有它 LuCI 存不进内核）
+#   4) LuCI 前端     www/luci-static/resources/protocol/wireguard.js
+if grep -qE '^lib/modules/[^/]+/wireguard\.ko$' "$LIST"; then
+	echo "    OK      内核模块 wireguard.ko"
+else
+	echo "    FAIL    缺少 wireguard.ko（kmod-wireguard 没进去）"
+	fail=$((fail + 1))
+fi
+wg_missing=""
+for p in usr/bin/wg lib/netifd/proto/wireguard.sh \
+         www/luci-static/resources/protocol/wireguard.js; do
+	if ! grep -F -x -q "$p" "$LIST"; then wg_missing="$wg_missing $p"; fi
+done
+if [ -z "$wg_missing" ]; then
+	echo "    OK      wg 命令 / netifd 协议 / LuCI 前端"
+else
+	echo "    FAIL    缺少 WireGuard 组件：$wg_missing"
+	fail=$((fail + 1))
+fi
+# 加密原语：名字随内核版本有差异，用宽松匹配，只要命中即可
+if grep -qE '^lib/modules/[^/]+/crypto_(chacha20poly1305|curve25519[^/]*)\.ko$' "$LIST"; then
+	echo "    OK      加密原语（chacha20poly1305 / curve25519）"
+else
+	echo "    FAIL    缺少 WireGuard 依赖的加密模块（会 insmod 失败）"
+	fail=$((fail + 1))
+fi
+
 echo "==> OpenClash 本体"
 has etc/init.d/openclash || true
 has etc/config/openclash || true

@@ -2,7 +2,7 @@
 
 自动跟踪 [immortalwrt/immortalwrt](https://github.com/immortalwrt/immortalwrt) 的最新**正式版** tag，编译 x86_64 固件，并发布到本仓库 Releases。
 
-默认**简体中文** + **Argon 主题（含 `luci-app-argon-config` 设置面板）**，内置 **UPnP**、**OpenClash（含 Mihomo 内核与四个数据库）**，已移除**挂载点**功能（`block-mount` / `automount`）。
+默认**简体中文** + **Argon 主题（含 `luci-app-argon-config` 设置面板）**，内置 **UPnP**、**OpenClash（含 Mihomo 内核与四个数据库）**、**WireGuard**，已移除**挂载点**功能（`block-mount` / `automount`）。
 
 ## 发布产物
 
@@ -78,7 +78,7 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
 6. **Ruby YJIT 拖慢 2 小时**：x86_64 上 `RUBY_ENABLE_YJIT` 默认 `=y`，会先编 `rust/host`，rustc 再编一遍 LLVM。`config/ci-extra.config` 已关闭。
 7. **配置校验脚本曾长期"假通过"**：`verify_config.py` 的前几版用 awk/grep 实现，连环踩了四个隐式行为坑 —— `index()` 前缀误判、mawk 把 `luci-theme-argon` 当算术表达式、`key` 是 mawk 内置函数名、`CONFIG` 是 bash 保留变量会被读成空。表现为**所有检查一律 WARN 放行**，看着"通过"其实什么都没验。现改为 Python 逐行字符串比较，并用「正例全绿 + 反例必须报 FAIL」双向验证过。
 8. **`feeds list -r` 的 `-r` 不是包名**：它是「限定 feed 名」（`luci`/`packages`/…）。传包名进去搜索范围为 0，永远返回空，会误报「官方 feed 里没有 luci-theme-argon」。另外 `feeds list` 的输出格式是 `printf "%-32s\t%s\n"`，**包名被补齐到 32 字符后才跟 TAB**，按 `$1==包名` 精确比较会因尾部空格失败 —— 必须先 `gsub` 掉尾部空白。两个坑叠在一起，排查花了三轮 CI。
-9. **驱动裁剪有两处入口，漏一处就白干**：x86 目标在 `target/linux/x86/image/64.mk` 的 `DEVICE_PACKAGES` 和 `target/linux/x86/Makefile` 的 `DEFAULT_PACKAGES` **两个地方**都注入 kmod，`.config` 里写 `=n` 对两者都无效。v25.12.2 实测：`DEFAULT_PACKAGES` 里躺着 **22 个**用不到的驱动（`kmod-i40e kmod-igb kmod-igbvf kmod-ixgbe kmod-ixgbevf kmod-pcnet32 kmod-tulip kmod-vmxnet3 kmod-r8101/r8125/r8126/r8168 kmod-8139cp kmod-8139too kmod-fs-f2fs kmod-usb-*` 等），`DEVICE_PACKAGES` 里还有 8 个。`trim_x86.py` 早期版本只处理 `DEVICE_PACKAGES`、`DEFAULT_PACKAGES` 里只删 `automount`，等于**大头完全没裁**。现在两处按同一份 `KEEP` 集合过滤，合计移除 30 个，只留 `kmod-igc`(i225/i226) / `kmod-e1000e` / `kmod-e1000` / `autocore` 等。
+9. **驱动裁剪有两处入口，漏一处就白干**：x86 目标在 `target/linux/x86/image/64.mk` 的 `DEVICE_PACKAGES` 和 `target/linux/x86/Makefile` 的 `DEFAULT_PACKAGES` **两个地方**都注入 kmod，`.config` 里写 `=n` 对两者都无效。v25.12.2 实测：`DEFAULT_PACKAGES` 里躺着 **22 个**用不到的驱动（`kmod-i40e kmod-igb kmod-igbvf kmod-ixgbe kmod-ixgbevf kmod-pcnet32 kmod-tulip kmod-vmxnet3 kmod-r8101/r8125/r8126/r8168 kmod-8139cp kmod-8139too kmod-fs-f2fs kmod-usb-*` 等），`DEVICE_PACKAGES` 里还有 8 个。`trim_x86.py` 早期版本只处理 `DEVICE_PACKAGES`、`DEFAULT_PACKAGES` 里只删 `automount`，等于**大头完全没裁**。现在两处按同一份 `KEEP` 集合过滤，`KEEP` 里**只剩 `kmod-igc`**（i225/i226），其余网卡驱动（含 `kmod-e1000e` / `kmod-e1000` / `kmod-virtio-net`）全部移除；非 kmod 前缀的 `i915-firmware-dmc` 由单独一组 `DROP_EXTRA` 收纳（详见坑 23）。
 10. **`python3-distutils` 在 Ubuntu 24.04 已被移除**（Python 3.12 删掉 distutils）。混在 `apt-get install` 主列表里会让整步以 `exit 100` 失败，需单独 `|| true` 容错安装。
 11. **`actions/checkout@v4`、`upload-artifact@v4` 跑在 Node 20 上**，GitHub 会报 Node.js 20 deprecated 警告。已全部升到 v7（`using: node24`）。
 12. **匿名调用 GitHub API 会撞 403**：解析上游 tag 时原本是裸 `curl`，共享 runner IP 只有 60 次/小时匿名额度，一撞上就 `curl: (22) ... error: 403`，整条流水线直接红。现统一走 `scripts/resolve_tag.sh`：带 `GITHUB_TOKEN` 认证（5000 次/小时），失败自动退回 `git ls-remote --tags`（完全不受 API 限流影响），两条都挂才报错。
@@ -153,12 +153,32 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
 
 实测数值（2026-10）：内核下载 22MB → 解压 62MB；Country.mmdb 7.6MB、GeoSite.dat 4.3MB、GeoIP.dat 16.5MB、ASN.mmdb 9.0MB。下载走 `github.com` 直连，失败自动切 `gh-proxy.com` 加速再回退直连（三通道重试）。
 
+## WireGuard：内置的是什么
+
+编译期直接选中三个包，不靠运行时 opkg 装：
+
+| 包 | 提供 | 说明 |
+|---|---|---|
+| `kmod-wireguard` | `wireguard.ko` | 6.12 内核已内置 WireGuard，这里只是编成可加载模块 |
+| `wireguard-tools` | `/usr/bin/wg`、`/lib/netifd/proto/wireguard.sh`、`wireguard_watchdog` | 用户态控制程序 + netifd 协议处理器 |
+| `luci-proto-wireguard` | LuCI 界面 + peer 二维码 | 依赖 `ucode`、`luci-lib-uqr`、`resolveip` |
+
+自动拉入的依赖（不用手写）：`kmod-crypto-lib-chacha20poly1305`、`kmod-crypto-lib-curve25519`、`kmod-udptunnel4`、`kmod-udptunnel6`（IPV6 开启时）。
+
+### 三个必须知道的事
+
+1. **没有 `wg-quick`**。`wireguard-tools` 的 `install` 段只装 `wg`（见上游 Makefile，`$(INSTALL_BIN) $(PKG_BUILD_DIR)/src/wg`），不含 `wg-quick`。OpenWrt 用 UCI + netifd 管理，**不要**指望往 `/etc/wireguard/wg0.conf` 丢配置文件。命令行调试用 `wg show`，配置走 `uci set network.wg0=interface`。
+2. **没有 `luci-app-wireguard`**。已用 API 核实 `immortalwrt/luci` 仓库 `applications/` 下**不存在**这个包（`search/code` 返回 0）。新版界面已合并进 `luci-proto-wireguard`。写了会因符号不存在而告警。入口是**网络 → 接口 → 添加新接口 → 协议选 WireGuard VPN**，不是独立菜单。
+3. **加密原语缺一不可**。`kmod-wireguard` 的 `DEPENDS` 里有 `kmod-crypto-lib-chacha20poly1305` / `kmod-crypto-lib-curve25519`，kconfig 会自动解析，但固件自检仍单独断言它们 —— 少了会在 `insmod` 时报 `unknown symbol`，而不是构建失败，刷进去才发现连不上。
+
+> 体积代价约 2MB（`wireguard.ko` ~350KB + 加密模块 ~300KB + `wg` ~100KB + LuCI/ucode ~1MB）。根分区 154MB / 512MB，余量充足。
+
 ## 构建期自检
 
 任一失败都会让 job 变红、不发 Release：
 
-1. `verify_config.py`：Argon 主题 + 设置工具 / 中文 / UPnP / OpenClash 三件套 / 依赖 / **`kmod-igc`(i225+i226)** 必须 `=y`；`luci-app-fstab`、`block-mount`、`automount`、`RUBY_ENABLE_YJIT` 必须关闭。`DEFAULT_block-mount` / `DEFAULT_automount` 只打 `NOTE` 不计失败（它们是 `select` 强制项，`.config` 里改不动，实际靠 `trim_x86.py` 改 target Makefile）。**符号不存在只告警不失败**（kconfig 对未被引用的符号不写任何行）。
-2. `verify_firmware.sh`：rootfs 里必须真有 Argon 资源、中文语言包、`clash_meta`（>20MB）、四个库（体积下限）、首启脚本 755；普通版不得含预配置脚本。
+1. `verify_config.py`：Argon 主题 + 设置工具 / 中文 / UPnP / OpenClash 三件套 / 依赖 / **`kmod-igc`(i225+i226)** / **WireGuard 三件套** 必须 `=y`（WireGuard 与 ccache 属 `MUST_Y_STRICT` 组，**符号不存在也算 FAIL**，其余项只 WARN）；`luci-app-fstab`、`block-mount`、`automount`、`RUBY_ENABLE_YJIT` 必须关闭。`DEFAULT_block-mount` / `DEFAULT_automount` 只打 `NOTE` 不计失败（它们是 `select` 强制项，`.config` 里改不动，实际靠 `trim_x86.py` 改 target Makefile）。**符号不存在只告警不失败**（kconfig 对未被引用的符号不写任何行）。
+2. `verify_firmware.sh`：rootfs 里必须真有 Argon 资源、中文语言包、`clash_meta`（>20MB）、四个库（体积下限）、`wireguard.ko` + `wg` + netifd 协议 + LuCI 前端 + 加密原语、首启脚本 755；同时断言 **不含** `luci-mod-dashboard` / `e1000`、`e1000e` / `i915` 固件，且 rootfs 体积放得进 512MB 分区；普通版不得含预配置脚本。
 3. `make_preconfigured.sh`：注入后必须能在镜像里定位 rootfs 分区（靠 `/etc/openwrt_release` 而非 `/dev/ 第一个 ext4`）、`90-preconfigured` 权限 755，gzip 完整性通过。
 4. `make` 全程 `set -o pipefail`，失败即红并上传 `build.log`。
 
