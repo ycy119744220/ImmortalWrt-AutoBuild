@@ -149,7 +149,7 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
 
     > **通用教训**：判定缓存是否生效，不能看 `actions/cache` 那句 "restored successfully"，也不能看 "有没有报错"。要看**消费方**的实际读数（`ccache -s` 的 Cache size / Hits）。中间任何一步 `rm -rf`、重新 clone、切目录，都可能把缓存抹掉而毫无提示。
 
-    > **现状（2026-11-17 起）**：已彻底弃用 `actions/cache`，改为 artifact 显式传递（见第 28、30 条）。`feeds.sh` 里那段 `.ccache.keep.$$` 暂存逻辑**保留**，因为 clone 覆盖目录这件事本身没变。
+    > **现状（2026-11-17 起）**：已彻底弃用 `actions/cache`，改为 artifact 显式传递（见第 28、30、33 条）。`feeds.sh` 里那段 `.ccache.keep.$$` 暂存逻辑**保留**，因为 clone 覆盖目录这件事本身没变。
 
 28. **`actions/cache` 的缓存可能"整份消失"，且没有任何提示**（2026-11-17，run `44010150256`）。这次表现更邪门：
     - `actions/cache` 直接打印 `Cache not found for input keys: ccache-Linux-v25.12.2-44010150256, ccache-Linux-v25.12.2-, ccache-Linux-` —— 三层 restore-key **全部**未命中
@@ -212,6 +212,40 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
     **修法**：上一步声明 `id: ccache_pack` 并写 `$GITHUB_OUTPUT`（先 `ready=false`，过体积闸门后才改成 `ready=true`），下一步 `if: always() && steps.ccache_pack.outputs.ready == 'true'`。step outputs 是运行期产生的，没有这个求值时机问题。
 
     > 教训：GitHub Actions 的表达式求值时机很反直觉 —— **凡是"根据前面步骤的产物决定要不要跑"，一律用 `outputs`，不要用 `hashFiles()` / `exists()` 之类探测文件的函数。**
+
+33. **ccache 上传成功了，下一轮却"找不到"**（run `44680565947`）。日志一边打印 `==> 打包完成 876MB`、artifact 列表里 `ccache-tar 875.4 MB` 确实在，下一轮却只剩一句：
+
+    ```
+    ==> 没有可用的 ccache artifact，本次冷编译
+    ==> make 退出码 0，耗时 3812 秒
+      Hits:  3257 / 29223 (11.15%)     ← 又是纯编译内部命中
+    ```
+
+    三个原因叠在一起，每一个单独都足以让缓存白费：
+
+    | # | 原因 | 后果 |
+    |---|---|---|
+    | 1 | `retention-days: 1` | 本项目不是每天构建（上游发版 + 手工触发），间隔常 3~7 天，缓存必然在用到前过期。11-17 传的、11-20 编时已失效 |
+    | 2 | 遍历最近 30 次 run、逐个查 `/runs/<id>/artifacts` | 33 个 HTTP 请求，runner 上容易超时/限流 |
+    | 3 | 上述请求带 `2>/dev/null` | 错误全被吞掉，只留下"没有可用的 artifact"这句**看起来像正常空结果**的话 |
+
+    **修法**：① `retention-days: 7`；② 改成**一次**请求仓库级 `/actions/artifacts?per_page=50`（它直接返回 `expired` 和 `workflow_run.id`，按 `created_at` 倒序），请求数 33 → 1；③ 去掉所有 `2>/dev/null`，每条失败路径都打印真实原因，但**仍然 exit 0**（缓存拿不到就冷编译，不让构建变红）；④ 用 `jq` 排除本 run 自己的 artifact（重跑时会拿到自己刚写的，等于没恢复）；⑤ 逻辑整体挪到 `scripts/find_ccache_artifact.sh`（见第 34 条）。
+
+34. **多行 Python 塞进 YAML `run: |` 会把整个文件缩进弄崩**。为了解析 artifacts JSON，我把一段 python 直接内联写进 workflow，python 代码从第 0 列开始：
+
+    ```
+    YAML 报错：
+      ScannerError: while scanning a simple key
+        in ".github/workflows/build.yml", line 181, column 1
+      could not find expected ':'
+    ```
+
+    原因：`run: |` 是**块标量**，块内所有行的缩进必须大于父节点。顶格写的 python 直接终止了块，后面的 `if [ -z "$found" ]` 被当成新的 YAML 键。
+
+    **修法**：逻辑外移到 `scripts/find_ccache_artifact.sh`，workflow 里只剩三行调用。顺带把 JSON 解析换成 `jq`（runner 上必有，是 `gh` 的依赖），比内联 python 短十倍。
+
+    > 教训：**workflow 的 `run:` 块里不要写超过一个"语句块"的复杂逻辑**。一旦需要循环/条件/跨行代码，就抽成 `scripts/*.sh`。这样做还有额外好处：脚本能用 `bash -n` 本地校验，而 YAML 里内联的 shell 只能靠跑一遍才发现问题。
+
 
 
 

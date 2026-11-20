@@ -146,49 +146,30 @@ jobs:
       # ---------------------------------------------------------------------
       # 恢复 ccache（从上一次运行留下的 artifact 取）
       #
-      # ⚠️ 这里不再用 actions/cache，原因见上。用 artifact 的三个好处：
-      #    1) 能看到实际传输了多少 MB（actions/cache 只在 miss 时说一句）；
-      #    2) artifact 的 90 天保留期不占用 cache 的 10GB 配额；
-      #    3) 失败/取消的运行也能留缓存（if: always()）。
+      # ⚠️ 两次踩坑记录，别改回去：
       #
-      # 用 gh api 挑「最近一次带 ccache-tar 附件的运行」，而不是写死 run_id：
-      # 上游换 tag 时旧缓存的 patch 级改动对不上，命中率会很低，但部分命中
-      # 仍然远好于冷编译，所以不做 tag 过滤，交给 ccache 自己的哈希判断。
+      # 坑A（run 44029752657）：用 `if: hashFiles('/tmp/ccache.tar') != ''` 控制上传，
+      #   结果 hashFiles 在 job 开始前就求值了，/tmp 文件还不存在 → 上传被 skipped。
+      #   已改成 step outputs。
       #
-      # 找不到（首次运行 / 附件过期被清理）就直接跳过，不失败。
+      # 坑B（run 44680565947）：恢复逻辑遍历最近 30 次 run，逐个查 artifacts 接口，
+      #   33 次 HTTP 请求，在 runner 上很容易超时/被限流；而 `2>/dev/null` 把错误
+      #   全吞了，于是日志只剩一句"没有可用的 ccache artifact，本次冷编译"，
+      #   明明上一轮刚上传了 875MB。且 `retention-days: 1` 意味着只要不是连续两天
+      #   内构建，缓存必然已过期 —— 手工触发时基本 100% 落空。
+      #
+      # 现在改为**一次**请求仓库级 artifacts 接口（/actions/artifacts），它直接
+      # 返回 expired / workflow_run.id，按 created_at 倒序取第一个未过期的。
+      # 请求数从 33 降到 1，且失败时打印真实错误而不是静默。
       # ---------------------------------------------------------------------
       - name: 恢复 ccache（从上一次运行）
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # 逻辑全在 scripts/find_ccache_artifact.sh 里，理由见该文件头注释。
+        # 关键点：这个步骤永远 exit 0 —— 缓存拿不到就冷编译，绝不因此让构建变红。
         run: |
-          set -uo pipefail
-          mkdir -p openwrt/.ccache
-          found=""
-          # 只翻最近 30 次运行，够用且不会撞 API 限流
-          for run_id in $(gh api "repos/$GITHUB_REPOSITORY/actions/runs?per_page=30" \
-                            --jq '.workflow_runs[] | select(.id != '"$GITHUB_RUN_ID"') | .id'); do
-            art_id=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts" \
-                       --jq '.artifacts[] | select(.name=="ccache-tar" and .expired==false) | .id' 2>/dev/null | head -1)
-            [ -n "$art_id" ] || continue
-            found="$art_id"
-            echo "==> 找到 ccache artifact: run $run_id / artifact $art_id"
-            break
-          done
-          if [ -z "$found" ]; then
-            echo "==> 没有可用的 ccache artifact，本次冷编译"
-            exit 0
-          fi
-          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$found/zip" > /tmp/ccache.zip
-          echo "==> 已下载 $(du -h /tmp/ccache.zip | cut -f1)"
-          unzip -q -o /tmp/ccache.zip -d /tmp/ccache_dl
-          tar_file=$(find /tmp/ccache_dl -name 'ccache.tar*' | head -1)
-          if [ -z "$tar_file" ]; then
-            echo "!! artifact 里没有 ccache.tar，本次冷编译"
-            exit 0
-          fi
-          tar -xf "$tar_file" -C openwrt/.ccache --strip-components=1 2>/dev/null \
-            || tar -xf "$tar_file" -C openwrt/.ccache
-          echo "==> ccache 已解压 $(du -sh openwrt/.ccache | cut -f1) / $(find openwrt/.ccache -type f | wc -l) 个文件"
+          chmod +x scripts/find_ccache_artifact.sh
+          ./scripts/find_ccache_artifact.sh openwrt/.ccache
           ccache --version | head -1 || true
           ccache -s 2>/dev/null | head -5 || true
 
@@ -436,6 +417,8 @@ jobs:
           echo "==> 打包完成 ${tar_mb}MB"
           # 先把 ready 置成 false，过闸门后才改成 true —— 这样中途任何 exit
           # 都不会让上传步骤误跑。
+          # 闸门定在 1.9GB：实测 954MB 目录 → 876MB tar → 875MB artifact，
+          # 上传是成功的（公开仓库并没有卡在 500MB），所以不需要为了配额砍缓存。
           echo "ready=false" >> "$GITHUB_OUTPUT"
           if [ "${tar_mb:-0}" -gt 1900 ]; then
             echo "!! 超过 1.9GB 闸门，跳过上传（下次仍会冷编译，但不会撑爆配额）"
@@ -459,7 +442,14 @@ jobs:
         with:
           name: ccache-tar
           path: /tmp/ccache.tar
-          retention-days: 1
-          # 0 = 不再压缩：ccache 内容本身已是二进制目标文件，gzip 收益 <10%，
-          # 上压缩只会把上传 CPU 时间从秒级拖到分钟级。
+          # retention-days: 7 —— 这是坑B的一部分。原来设 1 天，含义是"只要下一次
+          #   运行能取到"。但实际上本项目不是每天构建（上游出新 tag 才编，加上手工
+          #   触发），间隔常常 3~7 天，于是缓存 100% 在用到之前就过期了。
+          #   run 44680565947 就是典型：上一轮 11-17 传的缓存，11-20 编时已过期。
+          #   7 天覆盖正常的发布节奏，同时不至于长期堆积。
+          retention-days: 7
+          # ⚠️ compression-level 一直设为 0（不压缩）。理由是 ccache 里多是
+          #   .o/.a 二进制，gzip 收益低而 CPU 开销大。实测 .ccache 954MB →
+          #   tar 876MB → 上传后 artifact 875MB，可见 upload-artifact 自己那层
+          #   压缩也只挤出 1MB，验证了"收益低"的判断，保持 0。
           compression-level: 0
