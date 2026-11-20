@@ -2,7 +2,7 @@
 
 自动跟踪 [immortalwrt/immortalwrt](https://github.com/immortalwrt/immortalwrt) 的最新**正式版** tag，编译 x86_64 固件，并发布到本仓库 Releases。
 
-默认**简体中文** + **Argon 主题（含 `luci-app-argon-config` 设置面板）**，内置 **UPnP**、**OpenClash（含 Mihomo 内核与四个数据库）**、**WireGuard**，已移除**挂载点**功能（`block-mount` / `automount`）。
+默认**简体中文** + **Argon 主题（含 `luci-app-argon-config` 设置面板）**，内置 **UPnP**、**OpenClash（含 Mihomo 内核与四个数据库）**、**WireGuard**、**DDNS-Go**，已移除**挂载点**功能（`block-mount` / `automount`）。
 
 ## 发布产物
 
@@ -250,12 +250,29 @@ OpenClash 的 `install.sh` 只在**运行时**联网下载内核和数据库，�
 
 > 体积代价约 2MB（`wireguard.ko` ~350KB + 加密模块 ~300KB + `wg` ~100KB + LuCI/ucode ~1MB）。根分区 154MB / 512MB，余量充足。
 
+## DDNS-Go：内置的是什么
+
+两个包都来自**官方 feed**，没有自建包：
+
+| 包 | 出处 | 提供 |
+|---|---|---|
+| `ddns-go` | `immortalwrt/packages` → `net/ddns-go`（v6.17.0） | `/usr/bin/ddns-go`、`/etc/init.d/ddns-go`、`/etc/config/ddns-go` |
+| `luci-app-ddns-go` | `immortalwrt/luci` → `applications/luci-app-ddns-go` | 菜单「服务 → DDNS-Go」+ Web 视图 |
+
+### 三件要知道的事
+
+1. **这是本项目第一个要用 Go 编译的包**。`ddns-go` 的 `PKG_BUILD_DEPENDS` 是 `golang/host`（dummy 包，实际指向 `golang1.26/host`），于是 `make` 会先编一套 Go 工具链再编 ddns-go。**首编预计多 8~15 分钟**，且干净 runner 每次都得重编。
+2. **ccache 对它完全无效**。Go 用自己的 build cache（`GOCACHE`），不走 gcc，所以第 21~30 条那些 ccache 优化对它一点作用都没有。真要提速得单独缓存 `GOCACHE`，目前没做。
+3. **默认不启动**。上游 `files/ddns-go.conf` 里是 `option enabled '0'`，装好之后要自己进「服务 → DDNS-Go」或 `uci set ddns-go.config.enabled=1` 才跑。**没有替用户预设任何 DDNS 参数** —— 域名、服务商、密钥都是私密信息，不适合写进仓库。
+
+> 体积代价约 15MB（Go 静态二进制 ~13MB + LuCI ~0.3MB + 语言包）。rootfs 会从 155MB 涨到约 170MB，512MB 分区仍然宽裕。
+
 ## 构建期自检
 
 任一失败都会让 job 变红、不发 Release：
 
-1. `verify_config.py`：Argon 主题 + 设置工具 / 中文 / UPnP / OpenClash 三件套 / 依赖 / **`kmod-igc`(i225+i226)** / **WireGuard 三件套** 必须 `=y`（WireGuard 与 ccache 属 `MUST_Y_STRICT` 组，**符号不存在也算 FAIL**，其余项只 WARN）；`luci-app-fstab`、`block-mount`、`automount`、`RUBY_ENABLE_YJIT` 必须关闭。`DEFAULT_block-mount` / `DEFAULT_automount` 只打 `NOTE` 不计失败（它们是 `select` 强制项，`.config` 里改不动，实际靠 `trim_x86.py` 改 target Makefile）。**符号不存在只告警不失败**（kconfig 对未被引用的符号不写任何行）。
-2. `verify_firmware.sh`：rootfs 里必须真有 Argon 资源、中文语言包、`clash_meta`（>20MB）、四个库（体积下限）、`wireguard.ko` + `wg` + netifd 协议 + LuCI 前端 + 加密原语、首启脚本 755；同时断言 **不含** `luci-mod-dashboard` / `e1000`、`e1000e` / `i915` 固件，且 rootfs 体积放得进 512MB 分区；普通版不得含预配置脚本。
+1. `verify_config.py`：Argon 主题 + 设置工具 / 中文 / UPnP / OpenClash 三件套 / 依赖 / **`kmod-igc`(i225+i226)** / **WireGuard 三件套** / **DDNS-Go 两件套** 必须 `=y`（WireGuard、DDNS-Go 与 ccache 属 `MUST_Y_STRICT` 组，**符号不存在也算 FAIL**，其余项只 WARN）；`luci-app-fstab`、`block-mount`、`automount`、`RUBY_ENABLE_YJIT` 必须关闭。`DEFAULT_block-mount` / `DEFAULT_automount` 只打 `NOTE` 不计失败（它们是 `select` 强制项，`.config` 里改不动，实际靠 `trim_x86.py` 改 target Makefile）。**符号不存在只告警不失败**（kconfig 对未被引用的符号不写任何行）。
+2. `verify_firmware.sh`：rootfs 里必须真有 Argon 资源、中文语言包、`clash_meta`（>20MB）、四个库（体积下限）、`wireguard.ko` + `wg` + netifd 协议 + LuCI 前端 + 加密原语、**`ddns-go` 二进制（>3MB）+ init + UCI + LuCI 菜单/视图**、首启脚本 755；同时断言 **不含** `luci-mod-dashboard` / `e1000`、`e1000e` / `i915` 固件，且 rootfs 体积放得进 512MB 分区；普通版不得含预配置脚本。
 3. `make_preconfigured.sh`：注入后必须能在镜像里定位 rootfs 分区（靠 `/etc/openwrt_release` 而非 `/dev/ 第一个 ext4`）、`90-preconfigured` 权限 755，gzip 完整性通过。
 4. `make` 全程 `set -o pipefail`，失败即红并上传 `build.log`。
 

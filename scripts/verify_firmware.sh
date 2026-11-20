@@ -149,6 +149,31 @@ else
 	fail=$((fail + 1))
 fi
 
+echo "==> DDNS-Go（二进制 + init + UCI + LuCI 菜单/视图）"
+# 五处都要在。ddns-go 是 Go 静态二进制，没有 .so，出了问题不会在 ldd 里露馅，
+# 所以要同时验证「能跑的东西」和「能点开的界面」。
+#   usr/bin/ddns-go                       Go 编出来的主程序（~13MB，单文件）
+#   etc/init.d/ddns-go                    procd 脚本（上游文件，START=99）
+#   etc/config/ddns-go                    UCI 配置，默认 enabled=0
+#   usr/share/luci/menu.d/luci-app-ddns-go.json    菜单项（服务 → DDNS-Go）
+#   htdocs/.../view/ddns-go.js            LuCI 视图
+# 注意菜单路径是 `admin/services/ddns-go`，硬编码在包里的 json，
+# 不受「删除 Dashboard」等裁剪影响；改过 LuCI 菜单前缀的话这条会失效。
+ddnsgo_missing=""
+for p in usr/bin/ddns-go etc/init.d/ddns-go etc/config/ddns-go \
+         usr/share/luci/menu.d/luci-app-ddns-go.json \
+         www/luci-static/resources/view/ddns-go.js; do
+	if ! grep -F -x -q "$p" "$LIST"; then ddnsgo_missing="$ddnsgo_missing $p"; fi
+done
+if [ -z "$ddnsgo_missing" ]; then
+	echo "    OK      二进制 / init / UCI / LuCI 菜单与视图"
+else
+	echo "    FAIL    缺少 DDNS-Go 组件：$ddnsgo_missing"
+	fail=$((fail + 1))
+fi
+# 体积下限：Go 二进制压不到 3MB 以下，用下限拦住"装了空壳"
+size_of usr/bin/ddns-go 3000000 || true
+
 echo "==> OpenClash 本体"
 has etc/init.d/openclash || true
 has etc/config/openclash || true

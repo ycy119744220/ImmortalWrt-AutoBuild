@@ -56,6 +56,14 @@ MUST_Y_STRICT = [
     ("WireGuard VPN（内核模块 + 工具 + LuCI 界面）",
      ["PACKAGE_kmod-wireguard", "PACKAGE_wireguard-tools",
       "PACKAGE_luci-proto-wireguard"]),
+    # DDNS-Go：用户要求内置。
+    #   只有 luci-app 没有 ddns-go → 界面能打开但 /usr/bin/ddns-go 不存在，
+    #     procd 起不来，日志刷 "not found"，比装不上还难查。
+    #   只有 ddns-go 没有 luci-app → 功能可用但菜单没有，用户以为没装上。
+    # 另外 ddns-go 是 Go 源包，Go 工具链编不出来时 apk 会直接缺包而不是报错明显，
+    # 所以这里必须严格。
+    ("DDNS-Go（动态域名客户端 + LuCI 界面）",
+     ["PACKAGE_ddns-go", "PACKAGE_luci-app-ddns-go"]),
 ]
 # 必须关闭
 MUST_N = [

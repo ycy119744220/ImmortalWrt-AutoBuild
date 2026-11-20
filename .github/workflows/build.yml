@@ -362,6 +362,7 @@ jobs:
           - UPnP（miniupnpd-nftables）
           - OpenClash（官方包）+ Mihomo Meta 内核 + 四个数据库（预置，无需联网下载）
           - WireGuard（内核模块 + \`wg\` 命令 + LuCI 协议界面，开箱可配）
+          - DDNS-Go（动态域名，菜单「服务 → DDNS-Go」；默认未启用，需自填域名与密钥）
           - 已移除「挂载点」菜单
           - 已移除 LuCI 主页 Dashboard（首页由「状态 → 概览」接管）
           - 仅保留 igc（i225/i226）等必要网卡驱动；已剔除 e1000/e1000e 与全部显卡驱动
